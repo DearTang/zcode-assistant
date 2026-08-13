@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>zcode-assistant</title>
+    <style>
+      /* 启动防白屏 spinner（参考 myshell），React 首帧后移除 */
+      html,
+      body,
+      #root {
+        margin: 0;
+        height: 100%;
+      }
+      #boot-loader {
+        position: fixed;
+        inset: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #0e1116;
+        transition: opacity 0.3s ease;
+      }
+      #boot-loader .ring {
+        width: 34px;
+        height: 34px;
+        border-radius: 9999px;
+        border: 3px solid rgba(45, 212, 191, 0.2);
+        border-top-color: #2dd4bf;
+        animation: boot-spin 0.8s linear infinite;
+      }
+      @keyframes boot-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="boot-loader"><div class="ring"></div></div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

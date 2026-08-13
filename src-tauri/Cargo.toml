@@ -1,0 +1,63 @@
+[package]
+name = "zcode-assistant"
+version = "0.1.0"
+description = "zcode 使用增强工具"
+authors = ["zcode-assistant"]
+edition = "2021"
+
+[lib]
+name = "zcode_assistant_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 对外请求（配额查询 / 模型列表 / 更新检查），rustls 免 OpenSSL，socks 为 M4 代理预留，
+# stream 用于更新安装包流式下载
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "json",
+  "socks",
+  "stream",
+] }
+# zcode credentials.json 的 enc:v1 解密（AES-256-GCM）
+aes-gcm = "0.10"
+sha2 = "0.10"
+base64 = "0.22"
+# 路径 / UUID / 错误 / 时间
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "serde",
+] }
+# 持久化 + 凭证安全
+rusqlite = { version = "0.32", features = ["bundled"] }
+keyring = { version = "3", default-features = false, features = [
+  "windows-native",
+  "apple-native",
+  "sync-secret-service",
+] }
+# 文件选择对话框（导入配置时弹窗选文件）
+rfd = "0.14"
+# 日志
+log = "0.4"
+# 异步定时（自动切换调度）+ fs（更新安装包流式落盘）
+tokio = { version = "1", features = ["time", "fs"] }
+# reqwest bytes_stream() 的 StreamExt（更新下载分块读取）
+futures-util = "0.3"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

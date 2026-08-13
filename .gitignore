@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.local
+
+# 发布脚本用到的私人令牌（绝不提交）
+.gitee-token
+.github-token
+*.token
+
+# 本地数据 / 运行时产物
+*.db
+*.sqlite
+*.sqlite3
+
+# 本地截图、调试截图（可能含账号/密钥等界面信息）
+.screenshot.png
+screenshots/
+
+# AI 助手本地配置与缓存（.zcode 框架、会话计划、技能定义）
+.zcode/
+
+# 误生成的杂项空文件
+console.log('ERR'
+
+# 更新安装包下载产物
+*-update-setup.exe
+

@@ -1,0 +1,32 @@
+{
+  "name": "zcode-assistant",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "zcode 使用增强工具：配额监控、模型管理、自动切换、悬浮球、账号切换",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/sync-version.mjs && tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "test:ts": "tsc --noEmit",
+    "version:sync": "node scripts/sync-version.mjs",
+    "release:gitee": "node scripts/publish-gitee-release.mjs",
+    "release:github": "node scripts/publish-github-release.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.0"
+  }
+}

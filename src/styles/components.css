@@ -1,0 +1,399 @@
+/*
+ * 通用组件样式（液态玻璃）—— 移植自 Sequoia-X element-theme，纯 CSS class
+ * 命名约定：.za-<component>
+ */
+
+/* ===== 玻璃面板 ===== */
+.za-panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(12px) saturate(150%);
+  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-highlight), var(--shadow-md);
+  transition: border-color var(--t-base), transform var(--t-base);
+}
+.za-panel:hover {
+  border-color: var(--glass-border-strong);
+}
+
+.za-glass-strong {
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-highlight), var(--shadow-lg);
+}
+
+/* ===== 按钮 ===== */
+.za-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: 34px;
+  padding: 0 var(--space-4);
+  border: 1px solid var(--border-base);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--t-fast);
+  white-space: nowrap;
+  user-select: none;
+}
+.za-btn:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-overlay);
+}
+.za-btn:active {
+  transform: scale(0.97);
+}
+.za-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.za-btn-primary {
+  background: var(--accent);
+  border-color: transparent;
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.za-btn-primary:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 0 16px oklch(0.72 0.15 180 / 0.25);
+}
+.za-btn-primary:active {
+  background: var(--accent-pressed);
+}
+
+.za-btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.za-btn-ghost:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.za-btn-danger {
+  background: transparent;
+  border-color: var(--border-base);
+  color: var(--danger);
+}
+.za-btn-danger:hover {
+  background: oklch(0.62 0.24 27 / 0.12);
+  border-color: var(--danger);
+}
+
+.za-btn-sm {
+  height: 28px;
+  padding: 0 var(--space-3);
+  font-size: var(--fs-sm);
+}
+
+.za-icon-btn {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--t-fast);
+}
+.za-icon-btn:hover {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.za-icon-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ===== 输入框 ===== */
+.za-input,
+.za-select,
+.za-textarea {
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--space-3);
+  background: var(--bg-elevated);
+  border: none;
+  border-radius: var(--radius-md);
+  box-shadow: 0 0 0 1px var(--border-base) inset;
+  color: var(--text-primary);
+  font-size: var(--fs-md);
+  font-family: inherit;
+  transition: box-shadow var(--t-fast);
+}
+.za-textarea {
+  height: auto;
+  min-height: 80px;
+  padding: var(--space-2) var(--space-3);
+  line-height: 1.5;
+  resize: vertical;
+}
+.za-input:hover,
+.za-select:hover,
+.za-textarea:hover {
+  box-shadow: 0 0 0 1px var(--border-strong) inset;
+}
+.za-input:focus,
+.za-select:focus,
+.za-textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.za-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.za-field-label {
+  display: block;
+  margin-bottom: var(--space-2);
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* ===== 进度条 ===== */
+.za-progress {
+  width: 100%;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--bg-overlay);
+  overflow: hidden;
+}
+.za-progress-fill {
+  height: 100%;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  box-shadow: 0 0 10px oklch(0.72 0.15 180 / 0.4);
+  transition: width var(--t-slow) var(--ease-out);
+}
+.za-progress-fill[data-level="warn"] {
+  background: var(--warning);
+  box-shadow: 0 0 10px oklch(0.75 0.16 75 / 0.4);
+}
+.za-progress-fill[data-level="danger"] {
+  background: var(--danger);
+  box-shadow: 0 0 10px oklch(0.62 0.24 27 / 0.4);
+}
+
+/* ===== 标签 Badge ===== */
+.za-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+.za-badge-neutral {
+  background: var(--bg-overlay);
+  color: var(--text-secondary);
+}
+.za-badge-danger {
+  background: oklch(0.62 0.24 27 / 0.14);
+  color: var(--danger);
+}
+.za-badge-new {
+  background: oklch(0.72 0.19 145 / 0.16);
+  color: oklch(0.78 0.17 145);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ===== 开关（button 实现，无原生 checkbox 残影）===== */
+.za-switch {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 20px;
+  flex-shrink: 0;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-base);
+  transition: background var(--t-fast), border-color var(--t-fast);
+  outline: none;
+}
+.za-switch:hover {
+  border-color: var(--border-strong);
+}
+.za-switch-thumb {
+  position: absolute;
+  top: 50%;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transform: translateY(-50%);
+  transition: transform var(--t-fast), background var(--t-fast);
+}
+.za-switch.is-on {
+  background: var(--accent);
+  border-color: transparent;
+}
+.za-switch.is-on .za-switch-thumb {
+  left: 3px;
+  transform: translate(16px, -50%);
+  background: var(--accent-fg);
+}
+
+/* ===== 卡片标题区 ===== */
+.za-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-4);
+}
+.za-section-title h3 {
+  margin: 0;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.za-muted {
+  color: var(--text-secondary);
+}
+.za-faint {
+  color: var(--text-tertiary);
+}
+.za-mono {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+/* ===== 进入动画 ===== */
+@keyframes za-fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.za-fade-in {
+  animation: za-fade-in-up var(--t-slow) var(--ease-out) both;
+}
+
+/* ===== 用量查询 ===== */
+.za-usage-stat {
+  background: var(--bg-overlay);
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
+}
+.za-usage-filter {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.za-usage-filter .za-select {
+  width: 170px;
+}
+.za-usage-date {
+  width: auto;
+  min-width: 140px;
+}
+.za-tps-good {
+  color: #22c55e;
+}
+.za-tps-warn {
+  color: #f59e0b;
+}
+
+.za-usage-scroll {
+  overflow-x: auto;
+}
+.za-usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.za-usage-table th,
+.za-usage-table td {
+  padding: var(--space-2) var(--space-3);
+  white-space: nowrap;
+}
+.za-usage-table thead th {
+  color: var(--text-secondary);
+  font-weight: 500;
+  text-align: right;
+  border-bottom: 1px solid var(--glass-border);
+  cursor: pointer;
+  user-select: none;
+}
+.za-usage-table thead th.za-ut-l {
+  text-align: left;
+}
+.za-usage-table thead th.za-ut-share {
+  text-align: left;
+  cursor: default;
+}
+.za-usage-table tbody td {
+  text-align: right;
+  border-bottom: 1px solid var(--glass-border);
+}
+.za-usage-table tbody td.za-ut-l {
+  text-align: left;
+}
+.za-usage-table tbody td.za-ut-share {
+  text-align: left;
+}
+.za-usage-table tbody tr:hover {
+  background: var(--bg-overlay);
+}
+.za-usage-table td.za-ut-l {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.za-usage-bar {
+  position: relative;
+  width: 124px;
+  height: 18px;
+  background: var(--bg-overlay);
+  border-radius: var(--radius-full);
+}
+.za-usage-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: var(--radius-full);
+  opacity: 0.85;
+}
+.za-usage-bar-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  text-shadow: 0 0 4px var(--bg-elevated), 0 0 4px var(--bg-elevated);
+}
+

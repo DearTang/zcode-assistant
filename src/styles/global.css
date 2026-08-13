@@ -1,0 +1,138 @@
+/*
+ * 全局基础样式 + 动态漂移光晕背景
+ * 毛玻璃可见的关键前提：背景有彩色光晕透出，内容层透明。
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  color: var(--text-primary);
+  background-color: var(--bg-base);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+/* 动态漂移光晕：3 个缓慢移动的彩色光球，是液态玻璃的能量来源 */
+body::before,
+body::after,
+#root::before {
+  content: "";
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(80px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+body::before {
+  width: 600px;
+  height: 600px;
+  top: -150px;
+  right: -100px;
+  background: radial-gradient(circle, var(--orb-1), transparent 70%);
+  animation: drift-orb-1 18s var(--ease-out) infinite alternate;
+}
+
+body::after {
+  width: 550px;
+  height: 550px;
+  bottom: -180px;
+  left: -120px;
+  background: radial-gradient(circle, var(--orb-2), transparent 70%);
+  animation: drift-orb-2 22s var(--ease-out) infinite alternate;
+}
+
+#root::before {
+  width: 400px;
+  height: 400px;
+  top: 40%;
+  right: 30%;
+  background: radial-gradient(circle, var(--orb-3), transparent 70%);
+  animation: drift-orb-3 28s var(--ease-out) infinite alternate;
+}
+
+@keyframes drift-orb-1 {
+  0% {
+    transform: translate(0, 0) scale(1);
+  }
+  100% {
+    transform: translate(-180px, 220px) scale(1.15);
+  }
+}
+
+@keyframes drift-orb-2 {
+  0% {
+    transform: translate(0, 0) scale(1.1);
+  }
+  100% {
+    transform: translate(240px, -160px) scale(0.9);
+  }
+}
+
+@keyframes drift-orb-3 {
+  0% {
+    transform: translate(0, 0) scale(0.85);
+  }
+  100% {
+    transform: translate(-200px, 120px) scale(1.2);
+  }
+}
+
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+/* 细滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+::selection {
+  background: var(--accent-subtle);
+  color: var(--text-primary);
+}
+
+button {
+  font-family: inherit;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  body::before,
+  body::after,
+  #root::before {
+    animation: none;
+  }
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}
