@@ -22,6 +22,11 @@ pub fn rollout_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".zcode").join("cli").join("rollout"))
 }
 
+/// zcode CLI 的 SQLite 库（model_usage 等历史用量表，保留完整历史）
+pub fn zcode_cli_db_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".zcode").join("cli").join("db").join("db.sqlite"))
+}
+
 pub fn config_dir_str() -> String {
     zcode_v2_dir()
         .map(|d| d.to_string_lossy().to_string())

@@ -68,10 +68,16 @@ npm run tauri:build      # 产物在 src-tauri/target/release/bundle/
 npm run version:sync
 npm run tauri:build
 
-# 3. 发布到 Gitee（需设置 GITEE_TOKEN 环境变量，或仓库根 .gitee-token 文件）
-npm run release:gitee -- <version> <notes.md>
+# 3. 发布到 Gitee / GitHub（需设置对应 TOKEN 环境变量，或仓库根 .gitee-token / .github-token 文件）
+npm run release:gitee  -- <version> <notes.md>
+npm run release:github -- <version> <notes.md>
 # 例：npm run release:gitee -- 0.2.0 CHANGELOG.md
 ```
+
+## 📦 仓库
+
+- Gitee：<https://gitee.com/argustang/zcode-assistant>
+- GitHub：<https://github.com/DearTang/zcode-assistant>
 
 ## 🔄 自动更新
 

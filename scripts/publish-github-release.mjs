@@ -27,9 +27,8 @@ import { dirname, join, basename } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-// TODO: 改成你自己的 GitHub 仓库 owner / repo
-const OWNER = "<owner>";
-const REPO = "<repo>";
+const OWNER = "DearTang";
+const REPO = "zcode-assistant";
 const API = `https://api.github.com/repos/${OWNER}/${REPO}`;
 
 const MAX_ATTEMPTS = 4;

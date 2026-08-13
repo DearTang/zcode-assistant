@@ -4,11 +4,11 @@ use crate::types::{UsageAggRow, UsageFilters, UsageOverview, UsageRecord, UsageS
 use crate::usage;
 use tauri::State;
 
-/// 同步：扫描 rollout 文件，增量写入 usage_records，返回同步结果。
-/// `full=true` 时忽略 30 天窗口、回填全部历史；默认仅同步最近 30 天。
+/// 同步：从 zcode 的 model_usage 表增量导入 usage_records。
+/// `full=true` 时清空并全量重导；默认增量（按 rowid 续传，资源最省）。
 #[tauri::command]
 pub fn usage_sync(state: State<'_, AppState>, full: Option<bool>) -> Result<UsageSyncResult, String> {
-    usage::sync_rollout(&state.db, full.unwrap_or(false)).map_err(|e| e.to_string())
+    usage::sync_usage(&state.db, full.unwrap_or(false)).map_err(|e| e.to_string())
 }
 
 /// 筛选项（去重的供应商/模型/角色 + 日期范围 + 总条数）

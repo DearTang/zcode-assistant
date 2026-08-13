@@ -21,9 +21,9 @@
  */
 
 // --- 配置（来自你的 Umami Cloud 面板）---
+// 与 myshell 共用同一 Umami 站点（同一站点下用 event name / app_version 区分）。
 const UMAMI_ENDPOINT = "https://cloud.umami.is/api/send";
-// ← 注册 Umami 站点后填入；空则跳过上报
-const UMAMI_WEBSITE_ID = "";
+const UMAMI_WEBSITE_ID = "e3302fe3-b5fc-411f-8bc7-5948d3c923bb";
 
 // --- localStorage 键（za.* 前缀）---
 const KEY_DEVICE_ID = "za.deviceId";
