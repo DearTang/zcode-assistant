@@ -17,7 +17,9 @@ pub fn credentials_path() -> Option<PathBuf> {
     zcode_v2_dir().map(|d| d.join("credentials.json"))
 }
 
-/// zcode CLI 每次模型调用的逐行用量记录目录（model-io-sess_*.jsonl）
+/// zcode CLI 每次模型调用的逐行用量记录目录（model-io-sess_*.jsonl）。
+/// 注：rollout 会被 zcode 定期清理，历史用量已改用 `model_usage` 表，此函数保留备用。
+#[allow(dead_code)]
 pub fn rollout_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".zcode").join("cli").join("rollout"))
 }

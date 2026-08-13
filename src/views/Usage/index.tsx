@@ -328,9 +328,9 @@ export default function Usage() {
             className="za-btn za-btn-sm za-btn-ghost"
             onClick={() => doSync(true)}
             disabled={syncing}
-            title="解析全部历史记录（首次较慢，之后仍增量）"
+            title="清空本地缓存并从 zcode 用量库全量重新导入"
           >
-            全部历史
+            重新同步
           </button>
           <button
             className="za-btn za-btn-sm za-btn-primary"
@@ -398,7 +398,7 @@ export default function Usage() {
           >
             共 {syncInfo.totalCount.toLocaleString()} 条记录
             {syncInfo.scannedFiles > 0 &&
-              ` · 本次扫描 ${syncInfo.scannedFiles} 个文件 · 新增 ${syncInfo.newCount}`}
+              ` · 本次拉取 ${syncInfo.scannedFiles} 条 · 新增 ${syncInfo.newCount}`}
             {syncInfo.minDate && syncInfo.maxDate
               ? ` · 数据范围 ${syncInfo.minDate} ~ ${syncInfo.maxDate}`
               : ""}
@@ -456,7 +456,7 @@ export default function Usage() {
           <h3>输出速度</h3>
           <span
             className="za-faint"
-            title="输出 tokens ÷ 该次调用总耗时（含首 token 等待）。zcode 日志未单独记录 TTFB，故为有效吞吐口径。"
+            title="输出 tokens ÷ 生成耗时（总耗时 − 首 token 等待 TTFB），即真实吐字速度；TTFB 缺失时退化为总耗时。"
             style={{ fontSize: "var(--fs-xs)", cursor: "help" }}
           >
             token/s · 口径说明 ⓘ
