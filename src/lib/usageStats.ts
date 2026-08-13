@@ -99,7 +99,7 @@ export async function reportVersion(version: string, os: string): Promise<void> 
     type: "event" as const,
     payload: {
       website: UMAMI_WEBSITE_ID,
-      name: `app_launch_v${version}`,
+      name: `zcode-assistant_app_launch_v${version}`,
       // 自定义属性——在 Umami 面板可查看并分组。
       data: {
         device_id: deviceId,
