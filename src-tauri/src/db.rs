@@ -763,3 +763,30 @@ fn usage_filter_params(
     };
     (clause, params)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 前端 invoke 载荷 → serde 反序列化 → upsert → get 的完整回路。
+    /// 复现「火山 AK/SK 填写后无法保存」：弹窗初始模板只带 providerKey/method，
+    /// 载荷缺 name/url 等字段，若 serde 不容忍缺失 Option 字段则 upsert 直接报错。
+    #[test]
+    fn template_extra_json_roundtrip_minimal_payload() {
+        let dir = std::env::temp_dir().join(format!("za-db-test-{}", uuid::Uuid::new_v4()));
+        let db = Database::open(dir.join("t.db")).expect("open");
+
+        let payload = r#"{"providerKey":"volc","method":"GET","extraJson":"{\"accessKeyId\":\"AK123\",\"secretAccessKey\":\"SK456\"}"}"#;
+        let t: crate::types::QuotaTemplate =
+            serde_json::from_str(payload).expect("serde 应容忍缺失的 Option 字段");
+        assert_eq!(
+            t.extra_json.as_deref(),
+            Some(r#"{"accessKeyId":"AK123","secretAccessKey":"SK456"}"#)
+        );
+        db.upsert_template(&t).expect("upsert");
+        let got = db.get_template("volc").expect("get").expect("row missing");
+        assert_eq!(got.extra_json, t.extra_json, "extra_json 应完整落库");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

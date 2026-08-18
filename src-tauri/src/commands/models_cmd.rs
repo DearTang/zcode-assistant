@@ -92,6 +92,8 @@ pub async fn fetch_available_models(
         .iter()
         .map(|(id, c, o)| (id.to_string(), (*c, *o)))
         .collect();
+    // OpenRouter 目录：真实上下文（按模型名模糊匹配，优先于内置写死表）
+    let or_catalog = crate::openrouter::load_catalog(&state.db);
 
     let specs: Vec<ModelSpec> = arr
         .iter()
@@ -101,6 +103,11 @@ pub async fn fetch_available_models(
                 .get("context_length")
                 .and_then(|x| x.as_i64())
                 .or_else(|| m.get("max_context_length").and_then(|x| x.as_i64()))
+                .or_else(|| {
+                    or_catalog
+                        .as_ref()
+                        .and_then(|c| crate::openrouter::fuzzy_context(&c.models, &id))
+                })
                 .or_else(|| builtin_map.get(&id).map(|(c, _)| *c));
             let out = m
                 .get("max_output")
@@ -359,6 +366,64 @@ pub fn reorder_providers(ordered_keys: Vec<String>) -> Result<(), String> {
         .as_object_mut()
         .ok_or_else(|| "config 顶层非对象".to_string())?
         .insert("provider".into(), Value::Object(new_map));
+    config_file::write_config(&config).map_err(|e| e.to_string())
+}
+
+/// 拖拽排序后重排某 provider 下 models 的键顺序（写回 config.json）。
+///
+/// 与 reorder_providers 同款「槽位重排」：ordered_names 中的模型在原有槽位里
+/// 按新顺序填入，未包含的模型保持原位。依赖 serde_json 的 preserve_order。
+#[tauri::command]
+pub fn reorder_models(
+    provider_key: String,
+    ordered_names: Vec<String>,
+) -> Result<(), String> {
+    let mut config = config_file::read_config().map_err(|e| e.to_string())?;
+    let provider = config
+        .get_mut("provider")
+        .and_then(|p| p.get_mut(&provider_key))
+        .ok_or_else(|| "provider 不存在".to_string())?;
+    let models = provider
+        .get("models")
+        .and_then(|m| m.as_object())
+        .ok_or_else(|| "未找到 provider / models".to_string())?;
+
+    for n in &ordered_names {
+        if !models.contains_key(n) {
+            return Err(format!("排序清单含未知模型「{n}」"));
+        }
+    }
+
+    // 全量模型名当前顺序
+    let all_names: Vec<String> = models.keys().cloned().collect();
+    let order_map: std::collections::HashMap<&String, usize> = ordered_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n, i))
+        .collect();
+
+    let mut new_all = all_names.clone();
+    let slots: Vec<usize> = all_names
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| order_map.contains_key(n))
+        .map(|(i, _)| i)
+        .collect();
+    for (slot_idx, new_name) in slots.iter().zip(ordered_names.iter()) {
+        new_all[*slot_idx] = new_name.clone();
+    }
+
+    // 按新顺序重建 Map 并整体替换 models
+    let mut new_map = serde_json::Map::new();
+    for name in &new_all {
+        if let Some(v) = models.get(name) {
+            new_map.insert(name.clone(), v.clone());
+        }
+    }
+    let obj = provider
+        .as_object_mut()
+        .ok_or_else(|| "provider 非对象".to_string())?;
+    obj.insert("models".into(), Value::Object(new_map));
     config_file::write_config(&config).map_err(|e| e.to_string())
 }
 

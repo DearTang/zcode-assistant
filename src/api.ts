@@ -168,6 +168,9 @@ export const models = {
   /** 拖拽排序后重排 provider 顺序（写回 config.json） */
   reorderProviders: (orderedKeys: string[]) =>
     invoke<void>("reorder_providers", { orderedKeys }),
+  /** 拖拽排序后重排某 provider 下模型顺序（写回 config.json） */
+  reorderModels: (providerKey: string, orderedNames: string[]) =>
+    invoke<void>("reorder_models", { providerKey, orderedNames }),
   /** 切换单个 model 启用状态 */
   setModelEnabled: (
     providerKey: string,
@@ -268,6 +271,9 @@ export const quotaToken = {
   /** token 状态：是否已获取 + 获取时间 */
   status: (providerKey: string) =>
     invoke<QuotaTokenStatus>("quota_token_status", { providerKey }),
+  /** 读取明文 token（UI「显示」核对用，未获取返回 null） */
+  value: (providerKey: string) =>
+    invoke<string | null>("get_quota_token_value", { providerKey }),
   /** 清除已存的 token */
   clear: (providerKey: string) =>
     invoke<void>("clear_quota_token", { providerKey }),

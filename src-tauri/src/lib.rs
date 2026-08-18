@@ -8,6 +8,7 @@ mod commands;
 mod db;
 mod float_ball;
 mod http;
+mod openrouter;
 mod provider_resolve;
 mod sessions;
 mod state;
@@ -82,6 +83,15 @@ pub fn run() {
                 let _ = provider_resolve::scan_transcripts(&state.db);
             });
 
+            // OpenRouter 模型目录：每日启动拉取一次真实上下文（今天已拉过则跳过；
+            // 失败沿用上一次目录），供「拉取可用模型」模糊匹配填充 context
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = openrouter::daily_fetch(&handle).await {
+                    log::warn!("OpenRouter 模型目录拉取失败（沿用上一次）：{e}");
+                }
+            });
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -126,6 +136,7 @@ pub fn run() {
             commands::models_cmd::apply_models,
             commands::models_cmd::set_provider_enabled,
             commands::models_cmd::reorder_providers,
+            commands::models_cmd::reorder_models,
             commands::models_cmd::set_model_enabled,
             commands::models_cmd::remove_model,
             commands::models_cmd::get_provider_api_key,
@@ -147,6 +158,7 @@ pub fn run() {
             // 配额查询 Token 获取（弹登录窗，keyring 存储）
             commands::token_cmd::start_quota_token_login,
             commands::token_cmd::quota_token_status,
+            commands::token_cmd::get_quota_token_value,
             commands::token_cmd::clear_quota_token,
             commands::token_cmd::set_quota_login_password,
             // 账号

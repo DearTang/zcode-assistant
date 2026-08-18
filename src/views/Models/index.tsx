@@ -28,6 +28,7 @@ import {
   IconFolder,
   IconClose,
   IconZap,
+  IconStar,
 } from "../../components/icons";
 import { RestartBar } from "../../components/RestartBar";
 import { DualRing } from "../../components/DualRing";
@@ -214,6 +215,26 @@ export default function Models() {
     } catch (e: unknown) {
       toast.error(typeof e === "string" ? e : "检测失败");
     }
+  };
+
+  // ⭐ 设为/取消主供应商（全局唯一）：列表卡片右侧快捷切换；
+  // 立即触发 App 全局配额刷新，总览 / 悬浮窗 / 托盘马上切换数据源
+  const togglePrimary = (key: string, name: string) => {
+    const v = primary !== key;
+    models
+      .setPrimary(key, v)
+      .then(() => {
+        events.emitRefreshRequested();
+        setPrimary(v ? key : null);
+        toast.success(
+          v
+            ? `已设「${name}」为主供应商，总览 / 悬浮窗 / 托盘将展示其配额`
+            : "已取消主供应商，展示回退自动识别"
+        );
+      })
+      .catch((e) =>
+        toast.error(typeof e === "string" ? e : "设置主供应商失败")
+      );
   };
 
   // 隐藏系统未授权的 provider；builtin 由 builtinEntry 单独置顶展示；
@@ -590,6 +611,29 @@ export default function Models() {
                       </span>
                       <button
                         className="za-icon-btn"
+                        style={{
+                          width: 26,
+                          height: 26,
+                          color: primary === bKey ? "#F5B301" : undefined,
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          togglePrimary(bKey, bProv.name);
+                        }}
+                        title={
+                          primary === bKey
+                            ? "取消主供应商"
+                            : "设为主供应商：总览 / 悬浮窗 / 托盘展示此供应商的配额"
+                        }
+                      >
+                        <IconStar
+                          width={13}
+                          height={13}
+                          fill={primary === bKey ? "currentColor" : "none"}
+                        />
+                      </button>
+                      <button
+                        className="za-icon-btn"
                         style={{ width: 26, height: 26 }}
                         onClick={async (e) => {
                           e.stopPropagation();
@@ -730,6 +774,29 @@ export default function Models() {
                     </span>
                     <button
                       className="za-icon-btn"
+                      style={{
+                        width: 26,
+                        height: 26,
+                        color: primary === key ? "#F5B301" : undefined,
+                      }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        togglePrimary(key, p.name);
+                      }}
+                      title={
+                        primary === key
+                          ? "取消主供应商"
+                          : "设为主供应商：总览 / 悬浮窗 / 托盘展示此供应商的配额"
+                      }
+                    >
+                      <IconStar
+                        width={13}
+                        height={13}
+                        fill={primary === key ? "currentColor" : "none"}
+                      />
+                    </button>
+                    <button
+                      className="za-icon-btn"
                       style={{ width: 26, height: 26 }}
                       onClick={async (e) => {
                         e.stopPropagation();
@@ -773,7 +840,7 @@ export default function Models() {
         </div>
       </div>
 
-      {/* 双击供应商 → 编辑弹窗 */}
+      {/* 双击供应商 → 编辑弹窗（主供应商改在列表卡片 ⭐ 快捷切换） */}
       {editKey && editProvider && (
         <ProviderEditModal
           providerKey={editKey}
@@ -781,24 +848,6 @@ export default function Models() {
           isCurrent={isCurrentKey(editKey)}
           isBuiltin={editKey === builtinKey}
           busy={busy}
-          isPrimary={primary === editKey}
-          onTogglePrimary={(v) => {
-            models
-              .setPrimary(editKey, v)
-              .then(() => {
-                // 立即触发 App 全局配额刷新，总览 / 悬浮窗 / 托盘马上切换数据源
-                events.emitRefreshRequested();
-                toast.success(
-                  v
-                    ? "已设为主供应商，总览 / 悬浮窗 / 托盘将展示其配额"
-                    : "已取消主供应商，展示回退自动识别"
-                );
-              })
-              .catch((e) =>
-                toast.error(typeof e === "string" ? e : "设置主供应商失败")
-              );
-            setPrimary(v ? editKey : null);
-          }}
           onClose={() => setEditKey(null)}
           onRun={run}
         />
@@ -1000,8 +1049,6 @@ function ProviderEditModal({
   isCurrent,
   isBuiltin,
   busy,
-  isPrimary,
-  onTogglePrimary,
   onClose,
   onRun,
 }: {
@@ -1010,8 +1057,6 @@ function ProviderEditModal({
   isCurrent: boolean;
   isBuiltin: boolean;
   busy: boolean;
-  isPrimary: boolean;
-  onTogglePrimary: (enabled: boolean) => void;
   onClose: () => void;
   onRun: (fn: () => Promise<void>) => Promise<void>;
 }) {
@@ -1030,6 +1075,9 @@ function ProviderEditModal({
   const [fetchCands, setFetchCands] = useState<ModelSpec[] | null>(null);
   const [fetchSel, setFetchSel] = useState<Set<string>>(() => new Set());
   const [fetchQuery, setFetchQuery] = useState("");
+  // 模型拖拽排序：dragModelIdx=拖动源索引；gripRef=手柄按下标记（避免误触拖拽）
+  const [dragModelIdx, setDragModelIdx] = useState<number | null>(null);
+  const modelGripRef = useRef(false);
 
   // 用量查询模板（Token Plan 供应商仅用 extraJson 存附加凭据，其余为完整模板表单）
   const [tTmpl, setTTmpl] = useState<QuotaTemplate>({ providerKey, method: "GET" });
@@ -1037,6 +1085,9 @@ function ProviderEditModal({
   // 全部已保存模板（「使用模板」一键复制内容用）+ 当前 provider 的 Token 状态
   const [allTmpls, setAllTmpls] = useState<QuotaTemplate[]>([]);
   const [tToken, setTToken] = useState<QuotaTokenStatus | null>(null);
+  // 明文 token（点「显示」后从后端加载核对；fetchedAt 变化 = 新 token，自动收回明文）
+  const [revealedToken, setRevealedToken] = useState<string | null>(null);
+  const [tokenCopied, setTokenCopied] = useState(false);
   const isTokenMode = (tTmpl.authMode ?? "appkey") === "token";
   // Token Plan 供应商（按 baseURL 自动识别并查询；智谱团队/火山需附加凭据 → 模板 extraJson）
   const codingPlan = detectCodingPlan(provider.options.baseURL ?? "");
@@ -1120,6 +1171,22 @@ function ProviderEditModal({
       setFetchSel(init);
       setFetchQuery("");
     });
+
+  // 拖拽排序：把 dragModelIdx 项移到 targetIdx 位置，写回 config.json
+  const handleModelReorder = (targetIdx: number) => {
+    const src = dragModelIdx;
+    setDragModelIdx(null);
+    modelGripRef.current = false;
+    if (src === null || src === targetIdx) return;
+    const names = selModels.map(([n]) => n);
+    const [moved] = names.splice(src, 1);
+    names.splice(targetIdx, 0, moved);
+    onRun(async () => {
+      await models.reorderModels(providerKey, names);
+      toast.success("模型顺序已更新");
+      toast.warning(RESTART_HINT);
+    });
+  };
 
   const handleApplySelected = () =>
     onRun(async () => {
@@ -1217,6 +1284,34 @@ function ProviderEditModal({
     return () => un?.();
   }, [providerKey]);
 
+  // 新 token 写入（fetchedAt 变化）后收回已显示的明文
+  useEffect(() => {
+    setRevealedToken(null);
+    setTokenCopied(false);
+  }, [tToken?.fetchedAt]);
+
+  /** 显示/隐藏明文 token（显示时才从后端读取，平时不回传前端） */
+  const handleRevealToken = async () => {
+    if (revealedToken != null) {
+      setRevealedToken(null);
+      return;
+    }
+    const v = await quotaToken.value(providerKey);
+    setRevealedToken(v ?? "");
+  };
+
+  /** 复制明文 token 到剪贴板 */
+  const handleCopyToken = async () => {
+    if (!revealedToken) return;
+    try {
+      await navigator.clipboard.writeText(revealedToken);
+      setTokenCopied(true);
+      setTimeout(() => setTokenCopied(false), 1200);
+    } catch {
+      /* 剪贴板不可用，忽略 */
+    }
+  };
+
   /** 使用模板：把模板内容字段一键复制进当前表单（providerKey 保留当前供应商）；
    *  数据源含内置预设（Token Plan 6 家 + 余额 5 家，cc-switch 实测端点）与自己已保存的模板 */
   const handleUseTmpl = (key: string) => {
@@ -1241,7 +1336,9 @@ function ProviderEditModal({
       tokenSource: t.tokenSource,
       authMode: t.authMode,
       loginUsername: t.loginUsername,
-      extraJson: t.extraJson,
+      // 附加凭据（团队组织/项目 ID、火山 AK/SK）不属于「模板内容」：
+      // 所选模板没带就保留用户已填的，避免一键套用预设时静默清空密钥
+      extraJson: t.extraJson ?? tTmpl.extraJson,
     });
     toast.success("模板内容已复制，可修改后点「保存模板」");
   };
@@ -1343,25 +1440,6 @@ function ProviderEditModal({
                     : "当前供应商信息不可修改"}
                 </span>
               )}
-              {/* 主供应商：自定义供应商与智谱账号（builtin）均可设置 */}
-              <label
-                className="za-row"
-                style={{
-                  gap: 6,
-                  alignItems: "center",
-                  cursor: "pointer",
-                  fontSize: "var(--fs-xs)",
-                  color: "var(--text-secondary)",
-                }}
-                title="设为主供应商（全局唯一）：总览 / 悬浮窗 / 托盘均展示此供应商的配额信息；Token Plan 供应商（Kimi/智谱/MiniMax/ZenMux/火山）自动查询，其余需配置用量查询模板"
-              >
-                <input
-                  type="checkbox"
-                  checked={isPrimary}
-                  onChange={(e) => onTogglePrimary(e.target.checked)}
-                />
-                主供应商
-              </label>
             </div>
           </div>
           <div className="za-modal-grid" style={{ marginBottom: 16 }}>
@@ -1456,9 +1534,16 @@ function ProviderEditModal({
               marginBottom: 8,
             }}
           >
-            <span style={{ fontWeight: 600, fontSize: "var(--fs-md)" }}>
-              模型（{selModels.length}）
-            </span>
+            <div className="za-row" style={{ gap: 8, alignItems: "baseline" }}>
+              <span style={{ fontWeight: 600, fontSize: "var(--fs-md)" }}>
+                模型（{selModels.length}）
+              </span>
+              {selModels.length > 0 && (
+                <span className="za-faint" style={{ fontSize: "var(--fs-xs)" }}>
+                  拖动 ⠿ 手柄调整顺序
+                </span>
+              )}
+            </div>
             <button
               className="za-btn za-btn-sm za-btn-primary"
               disabled={busy}
@@ -1640,30 +1725,75 @@ function ProviderEditModal({
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-              {selModels.map(([name, m]) => (
-                <ModalModelRow
+              {selModels.map(([name, m], idx) => (
+                <div
                   key={name}
-                  name={name}
-                  model={m}
-                  busy={busy}
-                  onSave={(c, o) =>
-                    onRun(async () => {
-                      await models.updateModelLimit(providerKey, name, c, o);
-                      toast.success(`模型「${name}」已保存`);
-                      toast.warning(RESTART_HINT);
-                    })
-                  }
-                  onToggleEnabled={(v) =>
-                    onRun(async () => {
-                      await models.setModelEnabled(providerKey, name, v);
-                    })
-                  }
-                  onDelete={() =>
-                    onRun(async () => {
-                      await models.removeModel(providerKey, name);
-                    })
-                  }
-                />
+                  draggable
+                  onDragStart={(e) => {
+                    // 只有手柄按下时才允许拖拽，否则阻止（避免误触输入框选中等操作）
+                    if (!modelGripRef.current) {
+                      e.preventDefault();
+                      return;
+                    }
+                    setDragModelIdx(idx);
+                  }}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={() => handleModelReorder(idx)}
+                  onDragEnd={() => {
+                    modelGripRef.current = false;
+                    setDragModelIdx(null);
+                  }}
+                  style={{
+                    display: "flex",
+                    gap: 6,
+                    alignItems: "center",
+                    opacity: dragModelIdx === idx ? 0.5 : 1,
+                  }}
+                >
+                  <span
+                    onMouseDown={() => {
+                      modelGripRef.current = true;
+                    }}
+                    onMouseUp={() => {
+                      modelGripRef.current = false;
+                    }}
+                    style={{
+                      cursor: "grab",
+                      color: "var(--text-tertiary)",
+                      fontSize: "var(--fs-md)",
+                      lineHeight: 1,
+                      userSelect: "none",
+                      flexShrink: 0,
+                    }}
+                    title="拖动调整模型顺序"
+                  >
+                    ⠿
+                  </span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <ModalModelRow
+                      name={name}
+                      model={m}
+                      busy={busy}
+                      onSave={(c, o) =>
+                        onRun(async () => {
+                          await models.updateModelLimit(providerKey, name, c, o);
+                          toast.success(`模型「${name}」已保存`);
+                          toast.warning(RESTART_HINT);
+                        })
+                      }
+                      onToggleEnabled={(v) =>
+                        onRun(async () => {
+                          await models.setModelEnabled(providerKey, name, v);
+                        })
+                      }
+                      onDelete={() =>
+                        onRun(async () => {
+                          await models.removeModel(providerKey, name);
+                        })
+                      }
+                    />
+                  </div>
+                </div>
               ))}
             </div>
           )}
@@ -1803,27 +1933,39 @@ function ProviderEditModal({
                     <div style={credBoxStyle}>
                       <div
                         className="za-row-between"
-                        style={{ marginBottom: 8 }}
+                        style={{ marginBottom: 8, gap: 8 }}
                       >
-                        <span
-                          style={{
-                            fontWeight: 600,
-                            fontSize: "var(--fs-sm)",
-                          }}
-                        >
-                          智谱团队版（可选）
-                        </span>
-                        {tExtra.organizationId && (
+                        <div className="za-row" style={{ gap: 8, alignItems: "center" }}>
                           <span
-                            className="za-badge"
                             style={{
-                              background: "var(--accent-subtle)",
-                              color: "var(--accent)",
+                              fontWeight: 600,
+                              fontSize: "var(--fs-sm)",
                             }}
                           >
-                            团队版已配置
+                            智谱团队版（可选）
                           </span>
-                        )}
+                          {tExtra.organizationId && (
+                            <span
+                              className="za-badge"
+                              style={{
+                                background: "var(--accent-subtle)",
+                                color: "var(--accent)",
+                              }}
+                            >
+                              团队版已配置
+                            </span>
+                          )}
+                        </div>
+                        {/* 凭据就近保存：不用去面板顶部找「保存模板」 */}
+                        <button
+                          type="button"
+                          className="za-btn za-btn-sm za-btn-primary"
+                          disabled={busy}
+                          onClick={handleSaveTmpl}
+                          title="保存组织 / 项目 ID 到本机（写入模板附加凭据）"
+                        >
+                          保存
+                        </button>
                       </div>
                       <div className="za-grid za-grid-2" style={{ gap: 8 }}>
                         <label style={fieldStyle}>
@@ -1853,7 +1995,7 @@ function ProviderEditModal({
                         className="za-faint"
                         style={{ margin: "6px 0 0", fontSize: "var(--fs-xs)" }}
                       >
-                        填写并点「保存模板」后按团队接口（type=2 +
+                        填写并点本框「保存」后按团队接口（type=2 +
                         bigmodel-organization/project 头）查询；留空走个人版接口。
                       </p>
                     </div>
@@ -1863,27 +2005,39 @@ function ProviderEditModal({
                     <div style={credBoxStyle}>
                       <div
                         className="za-row-between"
-                        style={{ marginBottom: 8 }}
+                        style={{ marginBottom: 8, gap: 8 }}
                       >
-                        <span
-                          style={{
-                            fontWeight: 600,
-                            fontSize: "var(--fs-sm)",
-                          }}
-                        >
-                          火山方舟 AccessKey（必需）
-                        </span>
-                        {tExtra.accessKeyId && (
+                        <div className="za-row" style={{ gap: 8, alignItems: "center" }}>
                           <span
-                            className="za-badge"
                             style={{
-                              background: "var(--accent-subtle)",
-                              color: "var(--accent)",
+                              fontWeight: 600,
+                              fontSize: "var(--fs-sm)",
                             }}
                           >
-                            AK/SK 已配置
+                            火山方舟 AccessKey（必需）
                           </span>
-                        )}
+                          {tExtra.accessKeyId && (
+                            <span
+                              className="za-badge"
+                              style={{
+                                background: "var(--accent-subtle)",
+                                color: "var(--accent)",
+                              }}
+                            >
+                              AK/SK 已配置
+                            </span>
+                          )}
+                        </div>
+                        {/* 凭据就近保存：不用去面板顶部找「保存模板」 */}
+                        <button
+                          type="button"
+                          className="za-btn za-btn-sm za-btn-primary"
+                          disabled={busy}
+                          onClick={handleSaveTmpl}
+                          title="保存 AK/SK 到本机（写入模板附加凭据）"
+                        >
+                          保存
+                        </button>
                       </div>
                       <div className="za-grid za-grid-2" style={{ gap: 8 }}>
                         <label style={fieldStyle}>
@@ -1916,7 +2070,7 @@ function ProviderEditModal({
                         style={{ margin: "6px 0 0", fontSize: "var(--fs-xs)" }}
                       >
                         火山用量查询需账号级 AccessKey ID / Secret（与推理 API Key
-                        不同）。请在火山引擎控制台右上角账号菜单
+                        不同），填写后点本框「保存」保存到本机。请在火山引擎控制台右上角账号菜单
                         →「API访问密钥」中创建。
                         <br />
                         密钥创建地址：{" "}
@@ -2144,6 +2298,58 @@ function ProviderEditModal({
                       )}
                     </span>
                   </div>
+                  {/* 最终获取到的 token：默认掩码，点「显示」核对明文（可复制） */}
+                  {tToken?.hasToken && (
+                    <div
+                      className="za-row"
+                      style={{ gap: 6, marginBottom: 8, alignItems: "center" }}
+                    >
+                      <div
+                        className="za-mono"
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          height: 28,
+                          display: "flex",
+                          alignItems: "center",
+                          padding: "0 8px",
+                          borderRadius: 6,
+                          border: "1px solid var(--glass-border)",
+                          fontSize: "var(--fs-xs)",
+                          color:
+                            revealedToken != null
+                              ? "var(--text-primary)"
+                              : "var(--text-tertiary)",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                        title="最终获取到的 Token"
+                      >
+                        {revealedToken != null
+                          ? revealedToken || "（空）"
+                          : "••••••••••••"}
+                      </div>
+                      <button
+                        type="button"
+                        className="za-btn za-btn-sm"
+                        onClick={handleRevealToken}
+                        title={revealedToken != null ? "隐藏 Token" : "显示明文 Token"}
+                      >
+                        {revealedToken != null ? "隐藏" : "显示"}
+                      </button>
+                      {revealedToken != null && revealedToken && (
+                        <button
+                          type="button"
+                          className="za-btn za-btn-sm"
+                          onClick={handleCopyToken}
+                          title="复制 Token"
+                        >
+                          {tokenCopied ? "已复制" : "复制"}
+                        </button>
+                      )}
+                    </div>
+                  )}
                   <div className="za-grid za-grid-2" style={{ gap: 8 }}>
                     <label style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
                       登录页 URL
@@ -2196,7 +2402,8 @@ function ProviderEditModal({
                     点「登录获取 Token」弹出该平台登录页，在登录窗中完成登录
                     （含验证码 / 两步验证）即可；成功后自动提取 Token 存入系统凭证库，
                     模板中用 <span className="za-mono">{"{{token}}"}</span> 引用。提取方式：{" "}
-                    <span className="za-mono">cookie:名称</span>（非 HttpOnly）或{" "}
+                    <span className="za-mono">cookie:名称</span>（Windows 下支持 HttpOnly
+                    cookie）或{" "}
                     <span className="za-mono">localstorage:key</span>
                     （值为 JSON 加 <span className="za-mono">#字段.路径</span>）。
                   </p>

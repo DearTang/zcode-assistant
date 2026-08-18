@@ -7,8 +7,9 @@
 //!   cookie:<名称>                     —— document.cookie 中的指定 cookie
 //!   localstorage:<key>                —— localStorage 指定 key（整值）
 //!   localstorage:<key>#<dot.path>     —— 值为 JSON 时按点路径取子字段
-//! 限制：HttpOnly cookie 页面脚本读不到（浏览器安全模型），此类平台需用
-//! localStorage 规则或改走响应拦截（暂不支持）。
+//! 限制：HttpOnly cookie 页面脚本读不到（浏览器安全模型）；Windows 上由
+//! WebView2 CookieManager 轮询兜底（win_cookie_poll，可读 HttpOnly），
+//! 其余平台此类规则无法命中，需换 localStorage 规则。
 use crate::state::AppState;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -79,6 +80,13 @@ pub fn set_quota_login_password(provider_key: String, password: String) -> Resul
     Ok(())
 }
 
+/// 读取已保存的明文 token（供 UI「显示」核对最终捕获内容；仅在用户主动请求时返回）
+#[tauri::command]
+pub fn get_quota_token_value(provider_key: String) -> Result<Option<String>, String> {
+    Ok(read_token(&provider_key))
+}
+
+/// 清除已存的 token
 #[tauri::command]
 pub fn clear_quota_token(
     app: AppHandle,
@@ -221,6 +229,162 @@ fn build_script(conf: &ExtractConf, user: &str, pass: &str) -> Result<String, St
     ))
 }
 
+/// 保存 token：写 keyring + kv 时间戳 + 广播 quota://token-updated。
+/// 页面脚本回传（伪域名导航）与 Windows CookieManager 轮询两条通道共用。
+fn save_token(app: &AppHandle, provider_key: &str, token: &str) -> bool {
+    let Ok(entry) = keyring_entry(provider_key) else {
+        return false;
+    };
+    if entry.set_password(token).is_err() {
+        return false;
+    }
+    if let Some(s) = app.try_state::<AppState>() {
+        let _ = s
+            .db
+            .kv_set(&kv_time_key(provider_key), &chrono::Local::now().to_rfc3339());
+    }
+    let _ = app.emit(
+        "quota://token-updated",
+        serde_json::json!({ "providerKey": provider_key }),
+    );
+    true
+}
+
+/// Windows 专用：轮询 WebView2 CookieManager 提取 cookie（可读 HttpOnly）。
+/// 页面注入脚本受浏览器安全模型限制读不到 HttpOnly cookie（如阿里系 SSO 的
+/// login ticket），原生 CookieManager 无此限制；命中后与脚本通道共用
+/// save_token 落库并关窗，先到先得。
+#[cfg(target_os = "windows")]
+mod win_cookie_poll {
+    use super::save_token;
+    use std::sync::mpsc;
+    use tauri::{AppHandle, Manager};
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2CookieList, ICoreWebView2GetCookiesCompletedHandler,
+        ICoreWebView2GetCookiesCompletedHandler_Impl, ICoreWebView2_2,
+    };
+    use windows_core::{implement, Interface, PCWSTR};
+
+    type CookiePairs = Vec<(String, String)>;
+
+    /// GetCookies 完成回调：把 (名称, 值) 列表经 channel 送回轮询线程
+    #[implement(ICoreWebView2GetCookiesCompletedHandler)]
+    struct CookiesHandler {
+        tx: mpsc::Sender<Result<CookiePairs, String>>,
+    }
+
+    impl ICoreWebView2GetCookiesCompletedHandler_Impl for CookiesHandler_Impl {
+        fn Invoke(
+            &self,
+            errorcode: windows_core::HRESULT,
+            result: windows_core::Ref<'_, ICoreWebView2CookieList>,
+        ) -> windows_core::Result<()> {
+            if errorcode.is_err() {
+                let _ = self.tx.send(Err(format!("GetCookies 失败: {errorcode}")));
+                return Ok(());
+            }
+            let mut pairs: CookiePairs = Vec::new();
+            if let Ok(list) = result.ok() {
+                let mut count = 0u32;
+                if unsafe { list.Count(&mut count) }.is_ok() {
+                    for i in 0..count {
+                        let Ok(c) = (unsafe { list.GetValueAtIndex(i) }) else {
+                            continue;
+                        };
+                        let name = cookie_string(|v| unsafe { c.Name(v) });
+                        let value = cookie_string(|v| unsafe { c.Value(v) });
+                        pairs.push((name, value));
+                    }
+                }
+            }
+            let _ = self.tx.send(Ok(pairs));
+            Ok(())
+        }
+    }
+
+    /// 读取 cookie 的字符串出参（PWSTR 由调用方负责释放，转换后立即 CoTaskMemFree）
+    fn cookie_string(
+        f: impl FnOnce(*mut windows_core::PWSTR) -> windows_core::Result<()>,
+    ) -> String {
+        let mut pw = windows_core::PWSTR::null();
+        if f(&mut pw).is_err() || pw.is_null() {
+            return String::new();
+        }
+        let s = unsafe { pw.to_string().unwrap_or_default() };
+        unsafe {
+            windows::Win32::System::Com::CoTaskMemFree(Some(pw.as_ptr().cast()));
+        }
+        s
+    }
+
+    /// 向登录窗口的 CookieManager 请求全部 cookie（须在主线程调用）
+    unsafe fn request_all_cookies(
+        webview: &tauri::webview::PlatformWebview,
+        handler: &ICoreWebView2GetCookiesCompletedHandler,
+    ) -> windows_core::Result<()> {
+        let core = webview.controller().CoreWebView2()?;
+        let core2: ICoreWebView2_2 = core.cast()?;
+        let cm = core2.CookieManager()?;
+        // 空 URI = 列出全部 cookie（不限定域，跨域 SSO 票据也能命中）
+        cm.GetCookies(PCWSTR::null(), handler)?;
+        Ok(())
+    }
+
+    /// 单次查询：dispatch 到主线程调用 CookieManager，同步等待回调结果
+    fn query_once(app: &AppHandle) -> Result<CookiePairs, String> {
+        let (tx, rx) = mpsc::channel();
+        let app2 = app.clone();
+        app.run_on_main_thread(move || {
+            let Some(wv) = app2.get_webview_window("quota-login") else {
+                return;
+            };
+            let tx_err = tx.clone();
+            let tx_outer = tx_err.clone();
+            let r = wv.with_webview(move |webview| {
+                let handler: ICoreWebView2GetCookiesCompletedHandler =
+                    CookiesHandler { tx }.into();
+                let ok = unsafe { request_all_cookies(&webview, &handler) };
+                if let Err(e) = ok {
+                    let _ = tx_err.send(Err(e.to_string()));
+                }
+            });
+            if let Err(e) = r {
+                let _ = tx_outer.send(Err(e.to_string()));
+            }
+        })
+        .map_err(|e| format!("dispatch 主线程失败: {e}"))?;
+        rx.recv_timeout(std::time::Duration::from_secs(3))
+            .map_err(|e| format!("等待 CookieManager 结果超时: {e}"))?
+    }
+
+    /// 启动轮询线程：每秒查一次 CookieManager，命中目标 cookie（≥8 字符）即
+    /// 保存关窗；登录窗口关闭（用户手动关 / 脚本通道已命中）或 10 分钟超时退出。
+    pub fn spawn(app: AppHandle, provider_key: String, cookie_name: String) {
+        std::thread::spawn(move || {
+            let want = cookie_name.to_lowercase();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+            while std::time::Instant::now() < deadline {
+                if app.get_webview_window("quota-login").is_none() {
+                    break;
+                }
+                if let Ok(pairs) = query_once(&app) {
+                    if let Some((_, v)) = pairs.iter().find(|(n, _)| n.to_lowercase() == want) {
+                        if v.len() >= 8 {
+                            if save_token(&app, &provider_key, v) {
+                                if let Some(wv) = app.get_webview_window("quota-login") {
+                                    let _ = wv.close();
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
+        });
+    }
+}
+
 /// 启动登录获取 Token：弹独立 webview 窗口加载模板 login_url。
 /// async：建窗需 dispatch 到主线程（同 window.rs 约定，同步命令会死锁）。
 #[tauri::command]
@@ -277,19 +441,7 @@ pub async fn start_quota_token_login(
                 .map(percent_decode)
                 .filter(|t| t.len() >= 8);
             if let Some(token) = token {
-                if let Ok(e) = keyring_entry(&sink_key) {
-                    if e.set_password(&token).is_ok() {
-                        if let Some(s) = sink_app.try_state::<AppState>() {
-                            let _ = s
-                                .db
-                                .kv_set(&kv_time_key(&sink_key), &chrono::Local::now().to_rfc3339());
-                        }
-                        let _ = sink_app.emit(
-                            "quota://token-updated",
-                            serde_json::json!({ "providerKey": sink_key }),
-                        );
-                    }
-                }
+                save_token(&sink_app, &sink_key, &token);
             }
             if let Some(w) = sink_app.get_webview_window("quota-login") {
                 let _ = w.close();
@@ -298,6 +450,12 @@ pub async fn start_quota_token_login(
         })
         .build()
         .map_err(|e| format!("打开登录窗口失败: {e}"))?;
+
+    // Windows：HttpOnly cookie 页面脚本读不到 → CookieManager 轮询兜底（cookie 规则才需要）
+    #[cfg(target_os = "windows")]
+    if conf.mode == "cookie" {
+        win_cookie_poll::spawn(app.clone(), provider_key.clone(), conf.key.clone());
+    }
     Ok(())
 }
 

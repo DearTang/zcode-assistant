@@ -1,6 +1,6 @@
 [package]
 name = "zcode-assistant"
-version = "0.2.0"
+version = "0.3.0"
 description = "zcode 使用增强工具"
 authors = ["zcode-assistant"]
 edition = "2021"
@@ -59,6 +59,13 @@ regex = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }
+
+# Token 获取：WebView2 CookieManager 轮询（可读 HttpOnly cookie，如阿里系 SSO 票据）。
+# 版本须与 wry 依赖树一致（webview2-com 0.38 / windows 0.61），避免 COM 接口类型重复
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.38"
+windows-core = "0.61"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com"] }
 
 [profile.release]
 panic = "abort"
