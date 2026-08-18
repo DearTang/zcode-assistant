@@ -40,6 +40,7 @@ screenshots/
 
 # AI 助手本地配置与缓存（.zcode 框架、会话计划、技能定义）
 .zcode/
+.codegraph/
 
 # 误生成的杂项空文件
 console.log('ERR'

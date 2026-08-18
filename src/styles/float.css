@@ -110,16 +110,38 @@ html.za-floatball #root::before {
 }
 .fb-center {
   display: flex;
-  align-items: baseline;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  line-height: 1;
   color: var(--text-primary);
   font-family: var(--font-mono);
 }
+.fb-line {
+  display: flex;
+  align-items: baseline;
+}
+/* 上行：每 5 小时已用（主，字号略大） */
 .fb-pct {
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 700;
 }
 .fb-unit {
-  font-size: 9px;
+  font-size: 8px;
+  color: var(--text-secondary);
+  margin-left: 1px;
+}
+/* 下行：每周已用（次，弱化） */
+.fb-line-sub {
+  opacity: 0.78;
+}
+.fb-pct-sm {
+  font-size: 10px;
+  font-weight: 600;
+}
+.fb-unit-sm {
+  font-size: 7px;
   color: var(--text-secondary);
   margin-left: 1px;
 }
@@ -208,11 +230,8 @@ html.za-floatpanel #root::before {
 .fp-quota {
   margin-top: 4px;
 }
-.fp-actions {
-  margin-top: auto;
-  display: flex;
-  gap: 6px;
-}
-.fp-actions .za-btn {
-  flex: 1;
+.fp-row-sub {
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  font-weight: 400;
 }

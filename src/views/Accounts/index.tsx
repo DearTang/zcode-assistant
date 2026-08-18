@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { accounts as acc, events } from "../../api";
+import { accounts as acc, events, scheduleZcodeReload } from "../../api";
 import type { AccountMeta } from "../../types";
 import {
   IconPlus,
@@ -9,13 +9,13 @@ import {
   IconClose,
 } from "../../components/icons";
 import { RestartBar } from "../../components/RestartBar";
+import { toast } from "../../components/Toast";
 
 export default function Accounts() {
   const [list, setList] = useState<AccountMeta[]>([]);
   const [current, setCurrent] = useState<AccountMeta | null>(null);
   const [label, setLabel] = useState("");
   const [busy, setBusy] = useState(false);
-  const [msg, setMsg] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editLabel, setEditLabel] = useState("");
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -25,7 +25,7 @@ export default function Accounts() {
       setList(await acc.list());
       setCurrent(await acc.current());
     } catch (e: unknown) {
-      setMsg(String(e));
+      toast.error(String(e));
     }
   };
   useEffect(() => {
@@ -34,19 +34,18 @@ export default function Accounts() {
 
   const capture = async () => {
     setBusy(true);
-    setMsg(null);
     try {
       const cur = await acc.current();
       if (cur) {
-        setMsg(`该账号已存在（${cur.label}），无需重复捕获`);
+        toast.success(`该账号已存在（${cur.label}），无需重复捕获`);
         return;
       }
       await acc.capture(label || "账号");
       setLabel("");
       await reload();
-      setMsg("已捕获当前账号快照");
+      toast.success("已捕获当前账号快照");
     } catch (e: unknown) {
-      setMsg(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -59,9 +58,11 @@ export default function Accounts() {
       await reload();
       // 通知 Dashboard 立即刷新「当前账号 / 套餐」（不必等下一次 5s 轮询）
       events.emitRefreshRequested();
-      setMsg("已切换");
+      // 防抖触发 ZCode 重载窗口，让新账号登录态被 ZCode 重新读取
+      scheduleZcodeReload();
+      toast.success("已切换");
     } catch (e: unknown) {
-      setMsg(String(e));
+      toast.error(String(e));
     } finally {
       setBusy(false);
     }
@@ -71,9 +72,9 @@ export default function Accounts() {
       await acc.remove(id);
       setDeletingId(null);
       await reload();
-      setMsg("已删除账号");
+      toast.success("已删除账号");
     } catch (e: unknown) {
-      setMsg(String(e));
+      toast.error(String(e));
     }
   };
   const startEdit = (a: AccountMeta) => {
@@ -96,9 +97,9 @@ export default function Accounts() {
       await acc.rename(editingId, v);
       cancelEdit();
       await reload();
-      setMsg("已更新别名");
+      toast.success("已更新别名");
     } catch (e: unknown) {
-      setMsg(String(e));
+      toast.error(String(e));
     }
   };
 
@@ -266,14 +267,6 @@ export default function Accounts() {
               </div>
             );
           })}
-        </div>
-      )}
-      {msg && (
-        <div
-          className="za-muted za-mono"
-          style={{ fontSize: "var(--fs-xs)", marginTop: 10 }}
-        >
-          {msg}
         </div>
       )}
       </div>

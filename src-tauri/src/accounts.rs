@@ -118,9 +118,10 @@ pub fn capture(db: &Database, data_dir: &Path, label: &str) -> Result<AccountMet
     Ok(meta)
 }
 
-/// 切换到指定账号（kill → 备份 → 原子写回 → 重启）
+/// 切换到指定账号（kill → 备份 → 原子写回，**不拉起** ZCode）
 /// credentials 整体覆盖；config 仅用快照里的内置(builtin:)provider 覆盖，
 /// 保留用户自定义 provider，避免切换账号冲掉手动添加的供应商。
+/// 拉起/提示重启由调用方按「切换后提示重启」偏好决定。
 pub fn switch(db: &Database, data_dir: &Path, id: &str) -> Result<AccountMeta> {
     let meta = db
         .get_account(id)?
@@ -170,9 +171,6 @@ pub fn switch(db: &Database, data_dir: &Path, id: &str) -> Result<AccountMeta> {
         rollback(&last, &cred_path, &cfg_path)?;
         return Err(anyhow!("写 config 失败，已回滚"));
     }
-
-    // 重启
-    let _ = process::launch_zcode();
     Ok(meta)
 }
 

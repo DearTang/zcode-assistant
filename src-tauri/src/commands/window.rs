@@ -15,24 +15,12 @@ pub async fn show_main_window(app: AppHandle) {
     }
 }
 
-#[tauri::command]
-pub async fn show_float_ball(app: AppHandle) -> Result<(), String> {
-    crate::float_ball::show(&app).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn hide_float_ball(app: AppHandle) {
-    crate::float_ball::hide(&app);
-}
-
-#[tauri::command]
-pub async fn toggle_float_ball(app: AppHandle) -> Result<(), String> {
-    crate::float_ball::toggle(&app).map_err(|e| e.to_string())
-}
+// 悬浮球显隐命令已移除：统一走 prefs_cmd::set_float_ball_visible（持久化偏好），
+// 托盘菜单切换则直接调 float_ball::toggle 并回写偏好。
 
 #[tauri::command]
 pub async fn show_float_panel(app: AppHandle) -> Result<(), String> {
-    crate::float_ball::toggle_panel(&app).map_err(|e| e.to_string())
+    crate::float_ball::show_panel(&app).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -48,6 +36,12 @@ pub async fn toggle_float_panel(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+/// 覆盖启动：结束当前进程并重新拉起（单实例弹窗「覆盖启动」按钮调用）
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart();
 }
 
 /// 用前端 canvas 绘制的 RGBA 像素替换托盘图标，实现"配额直接显示在任务栏"

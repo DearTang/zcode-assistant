@@ -45,7 +45,8 @@ pub fn builtin_model_specs() -> Vec<ModelSpec> {
 }
 
 /// 拼 /models 端点（智谱 anthropic 端点用 paas/v4，其余按 OpenAI 兼容约定）
-fn models_endpoint(base: &str) -> String {
+/// 供拉取模型 / 连接测试 / 可用性健康检测共用
+pub(crate) fn models_endpoint(base: &str) -> String {
     let b = base.trim_end_matches('/');
     if b.contains("open.bigmodel.cn") || b.contains("bigmodel.cn") {
         return "https://open.bigmodel.cn/api/paas/v4/models".into();
@@ -150,9 +151,12 @@ pub fn add_provider(
     Ok(id)
 }
 
-/// 删除 provider
+/// 删除 provider（若是主供应商则同步清除标记，总览回退自动识别）
 #[tauri::command]
-pub fn remove_provider(provider_key: String) -> Result<(), String> {
+pub fn remove_provider(
+    state: State<'_, AppState>,
+    provider_key: String,
+) -> Result<(), String> {
     let mut config = config_file::read_config().map_err(|e| e.to_string())?;
     let providers = config
         .get_mut("provider")
@@ -161,7 +165,9 @@ pub fn remove_provider(provider_key: String) -> Result<(), String> {
     if providers.remove(&provider_key).is_none() {
         return Err("provider 不存在".into());
     }
-    config_file::write_config(&config).map_err(|e| e.to_string())
+    config_file::write_config(&config).map_err(|e| e.to_string())?;
+    let _ = state.db.clear_primary_if(&provider_key);
+    Ok(())
 }
 
 /// 更新 provider 的 name / kind / baseURL / apiKey（写回 config.json）
@@ -303,6 +309,59 @@ pub fn set_provider_enabled(provider_key: String, enabled: bool) -> Result<(), S
     config_file::write_config(&config).map_err(|e| e.to_string())
 }
 
+/// 拖拽排序后重排 provider 的键顺序（写回 config.json）。
+///
+/// ordered_keys 是用户可见供应商（非 builtin）的新顺序子集。
+/// 采用「槽位重排」：ordered_keys 中的项在其原有槽位里按新顺序填入，
+/// 其余 provider（builtin:、systemDisabled 等）保持原位不变。
+/// 依赖 serde_json 的 preserve_order feature（IndexMap 保留插入顺序）。
+#[tauri::command]
+pub fn reorder_providers(ordered_keys: Vec<String>) -> Result<(), String> {
+    let mut config = config_file::read_config().map_err(|e| e.to_string())?;
+    let providers = config
+        .get("provider")
+        .and_then(|p| p.as_object())
+        .ok_or_else(|| "config.json 无 provider 对象".to_string())?;
+
+    // 全量 key 当前顺序
+    let all_keys: Vec<String> = providers.keys().cloned().collect();
+    // ordered_keys 中各 key 的目标序号
+    let order_map: std::collections::HashMap<&String, usize> =
+        ordered_keys.iter().enumerate().map(|(i, k)| (k, i)).collect();
+
+    // 校验：ordered_keys 中的 key 必须都存在于 config
+    for k in &ordered_keys {
+        if !providers.contains_key(k) {
+            return Err(format!("排序清单含未知 provider「{k}」"));
+        }
+    }
+
+    // 槽位重排：找出 all_keys 中属于 ordered_keys 子集的位置，按新顺序填入
+    let mut new_all = all_keys.clone();
+    let slots: Vec<usize> = all_keys
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| order_map.contains_key(k))
+        .map(|(i, _)| i)
+        .collect();
+    for (slot_idx, new_key) in slots.iter().zip(ordered_keys.iter()) {
+        new_all[*slot_idx] = new_key.clone();
+    }
+
+    // 按新顺序重建 Map
+    let mut new_map = serde_json::Map::new();
+    for key in &new_all {
+        if let Some(v) = providers.get(key) {
+            new_map.insert(key.clone(), v.clone());
+        }
+    }
+    config
+        .as_object_mut()
+        .ok_or_else(|| "config 顶层非对象".to_string())?
+        .insert("provider".into(), Value::Object(new_map));
+    config_file::write_config(&config).map_err(|e| e.to_string())
+}
+
 /// 切换单个 model 的启用状态（写入 config.json 的 model.enabled 字段）
 #[tauri::command]
 pub fn set_model_enabled(
@@ -347,25 +406,26 @@ pub fn get_provider_api_key(provider_key: String) -> Result<String, String> {
     Ok(config_file::provider_api_key(&config, &provider_key).unwrap_or_default())
 }
 
-/// 标记/取消标记某 provider 为 Coding Plan 订阅（存 db，独立于 config.json）
+/// 设置/取消主供应商（全局唯一，存 db，独立于 config.json）。
+/// 总览 / 悬浮窗 / 托盘的配额展示均跟随主供应商。
 #[tauri::command]
-pub fn set_provider_coding_plan(
+pub fn set_provider_primary(
     state: State<'_, AppState>,
     provider_key: String,
     enabled: bool,
 ) -> Result<(), String> {
     state
         .db
-        .set_provider_coding_plan(&provider_key, enabled)
+        .set_provider_primary(&provider_key, enabled)
         .map_err(|e| e.to_string())
 }
 
-/// 列出所有被标记为 Coding Plan 的 provider key
+/// 取主供应商 key（未设置返回 null，总览回退自动识别智谱 Coding Plan）
 #[tauri::command]
-pub fn list_coding_plan_providers(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+pub fn get_primary_provider(state: State<'_, AppState>) -> Result<Option<String>, String> {
     state
         .db
-        .list_coding_plan_provider_keys()
+        .primary_provider_key()
         .map_err(|e| e.to_string())
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "zcode-assistant"
-version = "0.1.0"
+version = "0.2.0"
 description = "zcode 使用增强工具"
 authors = ["zcode-assistant"]
 edition = "2021"
@@ -14,8 +14,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
+# 单实例：启动时检测已有实例，弹窗选择重启或保持现有（新实例自动退出）
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 # 对外请求（配额查询 / 模型列表 / 更新检查），rustls 免 OpenSSL，socks 为 M4 代理预留，
 # stream 用于更新安装包流式下载
 reqwest = { version = "0.12", default-features = false, features = [
@@ -24,9 +26,10 @@ reqwest = { version = "0.12", default-features = false, features = [
   "socks",
   "stream",
 ] }
-# zcode credentials.json 的 enc:v1 解密（AES-256-GCM）
+# zcode credentials.json 的 enc:v1 解密（AES-256-GCM）；hmac 为火山方舟额度查询的签名 V4
 aes-gcm = "0.10"
 sha2 = "0.10"
+hmac = "0.12"
 base64 = "0.22"
 # 路径 / UUID / 错误 / 时间
 dirs = "5"
@@ -51,6 +54,8 @@ log = "0.4"
 tokio = { version = "1", features = ["time", "fs"] }
 # reqwest bytes_stream() 的 StreamExt（更新下载分块读取）
 futures-util = "0.3"
+# 从 transcript 文本抽取供应商 UUID→名称映射
+regex = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri = { version = "2", features = ["macos-private-api"] }

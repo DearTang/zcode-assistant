@@ -1,4 +1,4 @@
-//! 应用全局状态：DB 连接 + 共享 HTTP 客户端 + 数据目录
+//! 应用全局状态：DB 连接 + 共享 HTTP 客户端 + 数据目录 + 健康检测缓存
 use crate::{db::Database, http, types::ProxyConfig};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -7,6 +7,8 @@ pub struct AppState {
     pub db: Database,
     pub http: Mutex<reqwest::Client>,
     pub data_dir: PathBuf,
+    /// 当前供应商可用性检测的最新报告（冷却判断 + 状态展示共用）
+    pub health: Mutex<Option<crate::commands::health_cmd::HealthReport>>,
 }
 
 impl AppState {

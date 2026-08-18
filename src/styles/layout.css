@@ -100,6 +100,35 @@
   border-top: 1px solid var(--glass-border);
 }
 
+/* 版本号：侧边栏最底部靠左，点击打开「关于」弹窗（检查更新 / 更新日志） */
+.za-version {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  padding: 2px var(--space-3);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  transition: all var(--t-fast);
+}
+.za-version:hover {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+/* 有新版本时的提示小圆点 */
+.za-version-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
+
 /* ===== 主区 ===== */
 .za-main {
   flex: 1;

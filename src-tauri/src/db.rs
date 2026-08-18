@@ -1,10 +1,11 @@
 //! SQLite 数据层（代理配置 / 配额模板 / 账号元数据 / 自动切换规则 / 用量记录）
 use anyhow::{anyhow, Result};
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::types::{AccountMeta, AutoSwitchRule, QuotaTemplate, UsageAggRow, UsageFilters, UsageOverview, UsageRecord};
+use crate::types::{AccountMeta, AutoSwitchLog, AutoSwitchRule, QuotaTemplate, UsageAggRow, UsageFilters, UsageOverview, UsageRecord};
 
 pub struct Database {
     pub conn: Mutex<Connection>,
@@ -18,7 +19,10 @@ CREATE TABLE IF NOT EXISTS kv (
 CREATE TABLE IF NOT EXISTS quota_templates (
   provider_key TEXT PRIMARY KEY,
   name TEXT, method TEXT, url TEXT, headers_json TEXT, body TEXT,
-  total_path TEXT, used_path TEXT, remaining_path TEXT
+  total_path TEXT, used_path TEXT, remaining_path TEXT,
+  monthly_total_path TEXT, monthly_used_path TEXT, monthly_remaining_path TEXT,
+  login_url TEXT, token_source TEXT, auth_mode TEXT, login_username TEXT,
+  extra_json TEXT
 );
 CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
@@ -30,6 +34,7 @@ CREATE TABLE IF NOT EXISTS autoswitch_rules (
   name TEXT, kind TEXT, enabled INTEGER,
   time_start TEXT, time_end TEXT, weekdays TEXT,
   family TEXT, from_provider TEXT, to_provider TEXT,
+  from_model TEXT, to_model TEXT, project_dir TEXT,
   threshold REAL, priority INTEGER, created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS provider_meta (
@@ -58,6 +63,21 @@ CREATE TABLE IF NOT EXISTS usage_records (
 CREATE INDEX IF NOT EXISTS idx_usage_date     ON usage_records(date);
 CREATE INDEX IF NOT EXISTS idx_usage_provider ON usage_records(provider_id);
 CREATE INDEX IF NOT EXISTS idx_usage_model    ON usage_records(model_id);
+CREATE TABLE IF NOT EXISTS provider_aliases (
+  provider_id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  source TEXT,
+  updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS autoswitch_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  rule_id TEXT NOT NULL,
+  rule_name TEXT NOT NULL,
+  trigger_type TEXT NOT NULL,
+  success INTEGER NOT NULL,
+  message TEXT,
+  created_at TEXT NOT NULL
+);
 "#;
 
 impl Database {
@@ -67,6 +87,46 @@ impl Database {
         }
         let conn = Connection::open(path)?;
         conn.execute_batch(MIGRATION)?;
+        // 老库补列：autoswitch_rules.from_model / to_model / project_dir；
+        // quota_templates.login_url / token_source（登录获取 Token 功能）；
+        // provider_meta.is_primary（主供应商标记）
+        // SQLite 无 ADD COLUMN IF NOT EXISTS，重复列错误忽略，其余报错上抛
+        for col in ["from_model", "to_model", "project_dir"] {
+            let sql = format!("ALTER TABLE autoswitch_rules ADD COLUMN {col} TEXT");
+            if let Err(e) = conn.execute_batch(&sql) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(anyhow!("迁移失败: {msg}"));
+                }
+            }
+        }
+        for col in [
+            "login_url",
+            "token_source",
+            "auth_mode",
+            "login_username",
+            "extra_json",
+            "monthly_total_path",
+            "monthly_used_path",
+            "monthly_remaining_path",
+        ] {
+            let sql = format!("ALTER TABLE quota_templates ADD COLUMN {col} TEXT");
+            if let Err(e) = conn.execute_batch(&sql) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(anyhow!("迁移失败: {msg}"));
+                }
+            }
+        }
+        {
+            let sql = "ALTER TABLE provider_meta ADD COLUMN is_primary INTEGER DEFAULT 0";
+            if let Err(e) = conn.execute_batch(sql) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(anyhow!("迁移失败: {msg}"));
+                }
+            }
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -178,12 +238,17 @@ impl Database {
     pub fn upsert_template(&self, t: &QuotaTemplate) -> Result<()> {
         let c = self.lock()?;
         c.execute(
-            "INSERT INTO quota_templates(provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)
+            "INSERT INTO quota_templates(provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
              ON CONFLICT(provider_key) DO UPDATE SET name=excluded.name,method=excluded.method,url=excluded.url,
              headers_json=excluded.headers_json,body=excluded.body,total_path=excluded.total_path,
-             used_path=excluded.used_path,remaining_path=excluded.remaining_path",
-            params![t.provider_key, t.name, t.method, t.url, t.headers_json, t.body, t.total_path, t.used_path, t.remaining_path],
+             used_path=excluded.used_path,remaining_path=excluded.remaining_path,
+             monthly_total_path=excluded.monthly_total_path,monthly_used_path=excluded.monthly_used_path,
+             monthly_remaining_path=excluded.monthly_remaining_path,
+             login_url=excluded.login_url,token_source=excluded.token_source,
+             auth_mode=excluded.auth_mode,login_username=excluded.login_username,
+             extra_json=excluded.extra_json",
+            params![t.provider_key, t.name, t.method, t.url, t.headers_json, t.body, t.total_path, t.used_path, t.remaining_path, t.monthly_total_path, t.monthly_used_path, t.monthly_remaining_path, t.login_url, t.token_source, t.auth_mode, t.login_username, t.extra_json],
         )?;
         Ok(())
     }
@@ -191,21 +256,9 @@ impl Database {
     pub fn get_template(&self, provider_key: &str) -> Result<Option<QuotaTemplate>> {
         let c = self.lock()?;
         let r = c.query_row(
-            "SELECT provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path FROM quota_templates WHERE provider_key=?1",
+            "SELECT provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json FROM quota_templates WHERE provider_key=?1",
             params![provider_key],
-            |r| {
-                Ok(QuotaTemplate {
-                    provider_key: r.get(0)?,
-                    name: r.get(1)?,
-                    method: r.get(2)?,
-                    url: r.get(3)?,
-                    headers_json: r.get(4)?,
-                    body: r.get(5)?,
-                    total_path: r.get(6)?,
-                    used_path: r.get(7)?,
-                    remaining_path: r.get(8)?,
-                })
-            },
+            map_template_row,
         );
         match r {
             Ok(t) => Ok(Some(t)),
@@ -217,21 +270,9 @@ impl Database {
     pub fn list_templates(&self) -> Result<Vec<QuotaTemplate>> {
         let c = self.lock()?;
         let mut stmt = c.prepare(
-            "SELECT provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path FROM quota_templates",
+            "SELECT provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json FROM quota_templates",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(QuotaTemplate {
-                provider_key: r.get(0)?,
-                name: r.get(1)?,
-                method: r.get(2)?,
-                url: r.get(3)?,
-                headers_json: r.get(4)?,
-                body: r.get(5)?,
-                total_path: r.get(6)?,
-                used_path: r.get(7)?,
-                remaining_path: r.get(8)?,
-            })
-        })?;
+        let rows = stmt.query_map([], map_template_row)?;
         let mut v = Vec::new();
         for row in rows {
             v.push(row?);
@@ -253,7 +294,7 @@ impl Database {
     pub fn list_rules(&self) -> Result<Vec<AutoSwitchRule>> {
         let c = self.lock()?;
         let mut stmt = c.prepare(
-            "SELECT id,name,kind,enabled,time_start,time_end,weekdays,family,from_provider,to_provider,threshold,priority,created_at FROM autoswitch_rules ORDER BY created_at",
+            "SELECT id,name,kind,enabled,time_start,time_end,weekdays,from_provider,from_model,to_provider,to_model,project_dir,threshold,priority,created_at FROM autoswitch_rules ORDER BY priority IS NULL, priority ASC, created_at ASC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(AutoSwitchRule {
@@ -264,12 +305,14 @@ impl Database {
                 time_start: r.get(4)?,
                 time_end: r.get(5)?,
                 weekdays: r.get(6)?,
-                family: r.get(7)?,
-                from_provider: r.get(8)?,
+                from_provider: r.get(7)?,
+                from_model: r.get(8)?,
                 to_provider: r.get(9)?,
-                threshold: r.get(10)?,
-                priority: r.get(11)?,
-                created_at: r.get(12)?,
+                to_model: r.get(10)?,
+                project_dir: r.get(11)?,
+                threshold: r.get(12)?,
+                priority: r.get(13)?,
+                created_at: r.get(14)?,
             })
         })?;
         let mut v = Vec::new();
@@ -282,13 +325,30 @@ impl Database {
     pub fn upsert_rule(&self, r: &AutoSwitchRule) -> Result<()> {
         let c = self.lock()?;
         c.execute(
-            "INSERT INTO autoswitch_rules(id,name,kind,enabled,time_start,time_end,weekdays,family,from_provider,to_provider,threshold,priority,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+            "INSERT INTO autoswitch_rules(id,name,kind,enabled,time_start,time_end,weekdays,from_provider,from_model,to_provider,to_model,project_dir,threshold,priority,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,enabled=excluded.enabled,
-             time_start=excluded.time_start,time_end=excluded.time_end,weekdays=excluded.weekdays,family=excluded.family,
-             from_provider=excluded.from_provider,to_provider=excluded.to_provider,threshold=excluded.threshold,priority=excluded.priority",
-            params![r.id, r.name, r.kind, r.enabled as i64, r.time_start, r.time_end, r.weekdays, r.family, r.from_provider, r.to_provider, r.threshold, r.priority, r.created_at],
+             time_start=excluded.time_start,time_end=excluded.time_end,weekdays=excluded.weekdays,
+             from_provider=excluded.from_provider,from_model=excluded.from_model,
+             to_provider=excluded.to_provider,to_model=excluded.to_model,
+             project_dir=excluded.project_dir,
+             threshold=excluded.threshold,priority=excluded.priority",
+            params![r.id, r.name, r.kind, r.enabled as i64, r.time_start, r.time_end, r.weekdays, r.from_provider, r.from_model, r.to_provider, r.to_model, r.project_dir, r.threshold, r.priority, r.created_at],
         )?;
+        Ok(())
+    }
+
+    /// 批量重排优先级：按 ordered_ids 顺序写 priority=0,1,2...
+    pub fn reorder_rules(&self, ordered_ids: &[String]) -> Result<()> {
+        let c = self.lock()?;
+        let tx = c.unchecked_transaction()?;
+        for (i, id) in ordered_ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE autoswitch_rules SET priority=?1 WHERE id=?2",
+                params![i as i64, id],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -298,28 +358,87 @@ impl Database {
         Ok(())
     }
 
-    // ===== provider 元数据（Coding Plan 标记等）=====
-    /// 标记/取消标记某 provider 为 Coding Plan 订阅
-    pub fn set_provider_coding_plan(&self, provider_key: &str, enabled: bool) -> Result<()> {
+    // ===== 自动切换执行日志 =====
+
+    pub fn insert_switch_log(&self, l: &AutoSwitchLog) -> Result<()> {
         let c = self.lock()?;
         c.execute(
-            "INSERT INTO provider_meta(provider_key,is_coding_plan) VALUES(?1,?2)
-             ON CONFLICT(provider_key) DO UPDATE SET is_coding_plan=excluded.is_coding_plan",
-            params![provider_key, enabled as i64],
+            "INSERT INTO autoswitch_logs(rule_id,rule_name,trigger_type,success,message,created_at)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![l.rule_id, l.rule_name, l.trigger_type, l.success as i64, l.message, l.created_at],
         )?;
         Ok(())
     }
 
-    /// 取所有被标记为 Coding Plan 的 provider key
-    pub fn list_coding_plan_provider_keys(&self) -> Result<Vec<String>> {
+    /// 最近执行日志（时间倒序）
+    pub fn list_switch_logs(&self, limit: i64) -> Result<Vec<AutoSwitchLog>> {
         let c = self.lock()?;
-        let mut stmt = c.prepare("SELECT provider_key FROM provider_meta WHERE is_coding_plan=1")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut stmt = c.prepare(
+            "SELECT id,rule_id,rule_name,trigger_type,success,message,created_at
+             FROM autoswitch_logs ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit], |r| {
+            Ok(AutoSwitchLog {
+                id: r.get(0)?,
+                rule_id: r.get(1)?,
+                rule_name: r.get(2)?,
+                trigger_type: r.get(3)?,
+                success: r.get::<_, i64>(4)? != 0,
+                message: r.get(5)?,
+                created_at: r.get(6)?,
+            })
+        })?;
         let mut v = Vec::new();
         for row in rows {
             v.push(row?);
         }
         Ok(v)
+    }
+
+    // ===== provider 元数据（主供应商标记）=====
+    /// 设置/取消主供应商（全局唯一：设置时先清除已有标记）
+    pub fn set_provider_primary(&self, provider_key: &str, enabled: bool) -> Result<()> {
+        let c = self.lock()?;
+        if enabled {
+            c.execute("UPDATE provider_meta SET is_primary=0 WHERE is_primary=1", [])?;
+            c.execute(
+                "INSERT INTO provider_meta(provider_key,is_primary) VALUES(?1,1)
+                 ON CONFLICT(provider_key) DO UPDATE SET is_primary=1",
+                params![provider_key],
+            )?;
+        } else {
+            c.execute(
+                "INSERT INTO provider_meta(provider_key,is_primary) VALUES(?1,0)
+                 ON CONFLICT(provider_key) DO UPDATE SET is_primary=0",
+                params![provider_key],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 取主供应商 key（未设置返回 None）
+    pub fn primary_provider_key(&self) -> Result<Option<String>> {
+        let c = self.lock()?;
+        let r = c.query_row(
+            "SELECT provider_key FROM provider_meta WHERE is_primary=1",
+            [],
+            |r| r.get::<_, String>(0),
+        );
+        match r {
+            Ok(k) => Ok(Some(k)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// 删除 provider 时清除其主供应商标记（若是），总览回退自动识别
+    pub fn clear_primary_if(&self, provider_key: &str) -> Result<()> {
+        let c = self.lock()?;
+        c.execute(
+            "UPDATE provider_meta SET is_primary=0 WHERE provider_key=?1 AND is_primary=1",
+            params![provider_key],
+        )?;
+        Ok(())
     }
 
     // ===== 用量记录（解析自 ~/.zcode/cli/rollout）=====
@@ -358,6 +477,21 @@ impl Database {
         let c = self.lock()?;
         c.execute("DELETE FROM usage_records", [])?;
         Ok(())
+    }
+
+    /// 按会话 id 删除本地用量记录（会话在 zcode 库被删除后调用，保持用量页口径一致）
+    pub fn delete_usage_by_sessions(&self, session_ids: &[String]) -> Result<usize> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+        let c = self.lock()?;
+        let mut n = 0;
+        for chunk in session_ids.chunks(400) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!("DELETE FROM usage_records WHERE session_id IN ({placeholders})");
+            n += c.execute(&sql, rusqlite::params_from_iter(chunk))? as usize;
+        }
+        Ok(n)
     }
 
     /// 筛选项：去重后的供应商 / 模型 / 角色 + 日期范围 + 总条数
@@ -503,6 +637,36 @@ impl Database {
         }
         Ok(v)
     }
+
+    // ===== 供应商别名（解析自 transcript，独立于 zcode 配置，删渠道不影响）=====
+
+    /// 写入/更新一条供应商别名（来源：transcript）
+    pub fn upsert_provider_alias(&self, provider_id: &str, name: &str, source: &str) -> Result<()> {
+        let c = self.lock()?;
+        let now = chrono::Utc::now().to_rfc3339();
+        c.execute(
+            "INSERT INTO provider_aliases(provider_id,name,source,updated_at)
+             VALUES(?1,?2,?3,?4)
+             ON CONFLICT(provider_id) DO UPDATE SET name=excluded.name, source=excluded.source, updated_at=excluded.updated_at",
+            params![provider_id, name, source, now],
+        )?;
+        Ok(())
+    }
+
+    /// 取全部别名映射 provider_id -> name
+    pub fn provider_alias_map(&self) -> Result<HashMap<String, String>> {
+        let c = self.lock()?;
+        let mut stmt = c.prepare("SELECT provider_id, name FROM provider_aliases")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut m = HashMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            m.insert(k, v);
+        }
+        Ok(m)
+    }
 }
 
 /// 单行 → UsageRecord
@@ -525,6 +689,29 @@ fn map_usage_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<UsageRecord> {
         finish_reason: r.get(14)?,
         session_id: r.get(15)?,
         raw_path: r.get(16)?,
+    })
+}
+
+/// 单行 → QuotaTemplate（login_url/token_source 等可空列可能为 NULL）
+fn map_template_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<QuotaTemplate> {
+    Ok(QuotaTemplate {
+        provider_key: r.get(0)?,
+        name: r.get(1)?,
+        method: r.get(2)?,
+        url: r.get(3)?,
+        headers_json: r.get(4)?,
+        body: r.get(5)?,
+        total_path: r.get(6)?,
+        used_path: r.get(7)?,
+        remaining_path: r.get(8)?,
+        monthly_total_path: r.get(9)?,
+        monthly_used_path: r.get(10)?,
+        monthly_remaining_path: r.get(11)?,
+        login_url: r.get(12)?,
+        token_source: r.get(13)?,
+        auth_mode: r.get(14)?,
+        login_username: r.get(15)?,
+        extra_json: r.get(16)?,
     })
 }
 

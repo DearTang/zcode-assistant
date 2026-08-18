@@ -11,7 +11,7 @@ const LOGICAL_BALL: f64 = 64.0; // 球视觉尺寸
 const LOGICAL_WIN_W: f64 = 100.0; // 窗口宽（容纳下方 tooltip，避免裁剪）
 const LOGICAL_WIN_H: f64 = 112.0; // 窗口高：球 64 + tooltip 区
 const LOGICAL_PANEL_W: f64 = 280.0;
-const LOGICAL_PANEL_H: f64 = 380.0;
+const LOGICAL_PANEL_H: f64 = 300.0;
 
 /// 创建悬浮球（幂等），初始贴右侧偏上，固定显示。
 pub fn ensure_float_ball(app: &AppHandle) -> tauri::Result<()> {
@@ -105,20 +105,25 @@ pub fn hide(app: &AppHandle) {
     }
 }
 
-pub fn toggle(app: &AppHandle) -> tauri::Result<()> {
+/// 切换悬浮球显隐，返回切换后是否可见（供调用方持久化偏好）
+pub fn toggle(app: &AppHandle) -> tauri::Result<bool> {
     eprintln!("[float-ball] toggle");
     if let Some(w) = app.get_webview_window("float-ball") {
         if w.is_visible().unwrap_or(false) {
             if let Err(e) = w.hide() {
                 eprintln!("[float-ball] toggle hide failed: {e}");
             }
-        } else if let Err(e) = w.show() {
-            eprintln!("[float-ball] toggle show failed: {e}");
+            Ok(false)
+        } else {
+            if let Err(e) = w.show() {
+                eprintln!("[float-ball] toggle show failed: {e}");
+            }
+            Ok(true)
         }
-        Ok(())
     } else {
         eprintln!("[float-ball] not exist, ensure...");
-        ensure_float_ball(app)
+        ensure_float_ball(app)?;
+        Ok(true)
     }
 }
 
@@ -165,6 +170,30 @@ pub fn hide_panel(app: &AppHandle) {
     }
 }
 
+/// 展开面板：幂等纯显示（不存在则创建后显示），**不 toggle、不抢焦点**。
+/// 供悬浮球 hover 触发 —— set_focus 会让球窗口失焦闪烁，故仅 show。
+pub fn show_panel(app: &AppHandle) -> tauri::Result<()> {
+    eprintln!("[float-panel] show_panel: start");
+    if app.get_webview_window("float-panel").is_none() {
+        eprintln!("[float-panel] not exist, creating...");
+        create_panel(app)?;
+    }
+    if let Some(panel) = app.get_webview_window("float-panel") {
+        let visible = panel.is_visible().unwrap_or(false);
+        eprintln!("[float-panel] show_panel current visible={visible}");
+        if !visible {
+            position_panel_next_to_ball(app);
+            match panel.show() {
+                Ok(_) => eprintln!("[float-panel] show_panel shown"),
+                Err(e) => eprintln!("[float-panel] show_panel show failed: {e}"),
+            }
+        }
+    } else {
+        eprintln!("[float-panel] panel still None after create");
+    }
+    Ok(())
+}
+
 fn create_panel(app: &AppHandle) -> tauri::Result<()> {
     eprintln!(
         "[float-panel] create_panel: building {LOGICAL_PANEL_W}x{LOGICAL_PANEL_H}..."
@@ -206,7 +235,7 @@ fn position_panel_next_to_ball(app: &AppHandle) {
     let pw = (LOGICAL_PANEL_W * scale).round() as i32;
     match ball.outer_position() {
         Ok(bpos) => {
-            let x = bpos.x - pw - 8;
+            let x = bpos.x - pw - 4;
             let y = bpos.y.max(8);
             eprintln!(
                 "[float-panel] position: ball outer=({},{}) pw={pw} scale={scale} → ({x},{y})",

@@ -1,6 +1,8 @@
-//! Coding Plan 配额查询：走 bigmodel.cn 的 usage/quota/limit（用 provider apiKey，绕开 zcode.z.ai 的 WAF）
-//! + 通用配额模板查询
-use crate::db::Database;
+//! 配额查询：
+//!   - Token Plan 供应商（Kimi/智谱/MiniMax/ZenMux/火山）→ coding_plan 模块按 baseURL 自动识别，
+//!     自动使用供应商 API Key + Base URL（对齐 cc-switch）
+//!   - 智谱Coding Plan 账号 → fetch_zhipu_quota（bigmodel.cn usage/quota/limit）
+//!   - 其余供应商 → 通用配额模板查询
 use crate::state::AppState;
 use crate::zcode::config_file;
 use base64::{engine::general_purpose, Engine};
@@ -23,6 +25,8 @@ pub struct QuotaBucket {
 #[serde(rename_all = "camelCase")]
 pub struct QuotaOverview {
     pub source: String,
+    /// 配额所属供应商显示名（总览 / 悬浮窗 / 托盘标注数据来源）
+    pub provider_name: Option<String>,
     pub account_label: Option<String>,
     pub plan_name: Option<String>,
     pub buckets: Vec<QuotaBucket>,
@@ -33,16 +37,13 @@ pub struct QuotaOverview {
 /// 从 config.json 取用于配额查询的 apiKey（同时返回显示名/标识）
 ///
 /// 配额接口（bigmodel.cn/api/monitor/usage/quota/limit）是 Coding Plan 订阅配额，
-/// 必须用 Coding Plan 订阅 key 才有效。Coding Plan 判定优先用 db 显式标记
-/// （覆盖自定义 provider；内置 builtin:bigmodel-coding-plan 由标识符兜底识别）。
-/// 按优先级选取：
-///   1) db 标记为 Coding Plan 的 enabled provider
-///   2) db 标记为 Coding Plan 的任意 provider
-///   3) builtin 标识符含 coding-plan（兜底识别内置订阅 provider）
-///   4) 第一个 enabled 且有 apiKey 的 provider（回退，兼容旧行为）
-///   5) 任意有 apiKey 的 provider（兜底）
+/// 必须用 Coding Plan 订阅 key 才有效。Coding Plan 供应商由账号自动确认，
+/// 无需手动标记。按优先级选取：
+///   1) builtin 标识符含 coding-plan（账号登录态托管的内置订阅 provider）
+///   2) 第一个 enabled 且有 apiKey 的 provider（回退）
+///   3) 任意有 apiKey 的 provider（兜底）
 /// 否则会用 qwen/MiniMax 等非 bigmodel 的 key 查 bigmodel 配额，得到 401。
-fn current_provider_creds(db: &Database) -> Result<(String, String), String> {
+fn current_provider_creds() -> Result<(String, String), String> {
     let cfg = config_file::read_config().map_err(|e| e.to_string())?;
     let providers = cfg
         .get("provider")
@@ -68,30 +69,10 @@ fn current_provider_creds(db: &Database) -> Result<(String, String), String> {
             .to_string()
     };
     let enabled_of = |p: &Value| p.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    // db 显式标记为 Coding Plan 的 provider key（不依赖 config.json，可靠）
-    let marked = db.list_coding_plan_provider_keys().unwrap_or_default();
-    let is_marked = |key: &str| marked.iter().any(|m| m == key);
-    // 内置兜底：标识符含 coding-plan / codingplan
+    // 内置订阅 provider：标识符含 coding-plan / codingplan（由账号登录态自动确认）
     let is_builtin_cp = |key: &str| key.contains("coding-plan") || key.contains("codingplan");
 
-    // 1) db 标记的 enabled Coding Plan provider
-    for (key, p) in providers.iter() {
-        if is_marked(key) && enabled_of(p) {
-            if let Some(api_key) = api_key_of(p) {
-                return Ok((api_key, name_of(p, key)));
-            }
-        }
-    }
-    // 2) db 标记的任意 Coding Plan provider
-    for (key, p) in providers.iter() {
-        if is_marked(key) {
-            if let Some(api_key) = api_key_of(p) {
-                return Ok((api_key, name_of(p, key)));
-            }
-        }
-    }
-    // 3) builtin coding-plan provider（标识符兜底）
+    // 1) builtin coding-plan provider（账号自动确认）
     for (key, p) in providers.iter() {
         if is_builtin_cp(key) {
             if let Some(api_key) = api_key_of(p) {
@@ -99,7 +80,7 @@ fn current_provider_creds(db: &Database) -> Result<(String, String), String> {
             }
         }
     }
-    // 4) 回退：第一个 enabled 且有 apiKey 的 provider
+    // 2) 回退：第一个 enabled 且有 apiKey 的 provider
     for (key, p) in providers.iter() {
         if enabled_of(p) {
             if let Some(api_key) = api_key_of(p) {
@@ -107,7 +88,7 @@ fn current_provider_creds(db: &Database) -> Result<(String, String), String> {
             }
         }
     }
-    // 5) 兜底：任意有 apiKey 的 provider
+    // 3) 兜底：任意有 apiKey 的 provider
     for (key, p) in providers.iter() {
         if let Some(api_key) = api_key_of(p) {
             return Ok((api_key, name_of(p, key)));
@@ -156,19 +137,40 @@ fn limit_name(ltype: &str, unit: i64) -> String {
     }
 }
 
-/// 用指定 apiKey 查询 bigmodel Coding Plan 配额（5H/每周 + 重置时间）
-/// 由 fetch_coding_plan（全局选 key）和 get_provider_quota（按 provider）复用。
-async fn fetch_bigmodel_quota(
+/// 用指定 apiKey 查询智谱（bigmodel.cn / api.z.ai）Coding Plan 配额（5H/每周 + 重置时间）。
+/// 由 fetch_coding_plan（全局选 key）、coding_plan::fetch_quota（按 provider）复用；
+/// team = Some((组织 ID, 项目 ID)) 时按团队接口（?type=2 + bigmodel-organization/project 头）查询。
+pub(crate) async fn fetch_zhipu_quota(
     state: &AppState,
     api_key: &str,
     provider_name: &str,
+    root: &str,
+    team: Option<(&str, &str)>,
 ) -> Result<QuotaOverview, String> {
     let client = state.client();
 
-    // 1) 配额
-    let quota_resp: Value = client
-        .get("https://bigmodel.cn/api/monitor/usage/quota/limit")
-        .header("authorization", format!("Bearer {api_key}"))
+    // 1) 配额（团队版 ?type=2）
+    let quota_url = format!(
+        "{root}/api/monitor/usage/quota/limit{}",
+        if team.is_some() { "?type=2" } else { "" }
+    );
+    // bigmodel.cn 沿用本应用已验证的 Bearer；api.z.ai 按 cc-switch 实测用裸 Authorization
+    let auth_value = if root.contains("bigmodel") {
+        format!("Bearer {api_key}")
+    } else {
+        api_key.to_string()
+    };
+    let mut req = client
+        .get(&quota_url)
+        .header("Authorization", &auth_value)
+        .header("Content-Type", "application/json")
+        .header("Accept-Language", "en-US,en");
+    if let Some((org, project)) = team {
+        req = req
+            .header("bigmodel-organization", org)
+            .header("bigmodel-project", project);
+    }
+    let quota_resp: Value = req
         .send()
         .await
         .map_err(|e| e.to_string())?
@@ -178,27 +180,35 @@ async fn fetch_bigmodel_quota(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 2) 订阅（拿套餐名）-- 失败则回退到 quota level
-    let plan_name = match client
-        .get("https://bigmodel.cn/api/biz/subscription/list")
-        .header("authorization", format!("Bearer {api_key}"))
-        .send()
-        .await
-    {
-        Ok(r) => match r.json::<Value>().await {
-            Ok(j) => j
-                .get("data")
-                .and_then(parse_subscription_plan)
-                .or_else(|| {
-                    quota_resp
-                        .get("data")
-                        .and_then(|d| d.get("level"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from)
-                }),
+    // 2) 订阅（拿套餐名；z.ai 无此接口跳过）-- 失败则回退到 quota level
+    let plan_name = if root.contains("bigmodel") {
+        match client
+            .get("https://bigmodel.cn/api/biz/subscription/list")
+            .header("authorization", format!("Bearer {api_key}"))
+            .send()
+            .await
+        {
+            Ok(r) => match r.json::<Value>().await {
+                Ok(j) => j
+                    .get("data")
+                    .and_then(parse_subscription_plan)
+                    .or_else(|| {
+                        quota_resp
+                            .get("data")
+                            .and_then(|d| d.get("level"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from)
+                    }),
+                Err(_) => None,
+            },
             Err(_) => None,
-        },
-        Err(_) => None,
+        }
+    } else {
+        quota_resp
+            .get("data")
+            .and_then(|d| d.get("level"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
     };
 
     // 账号：优先从 apiKey JWT 解码
@@ -277,6 +287,7 @@ async fn fetch_bigmodel_quota(
 
     Ok(QuotaOverview {
         source: "bigmodel-usage".into(),
+        provider_name: Some(provider_name.to_string()),
         account_label: Some(account_label),
         plan_name,
         buckets,
@@ -285,10 +296,10 @@ async fn fetch_bigmodel_quota(
     })
 }
 
-/// 查询 Coding Plan 配额（全局：自动选 db 标记的 Coding Plan provider）
+/// 查询 Coding Plan 配额（全局：账号自动确认订阅 provider，无需手动标记）
 pub async fn fetch_coding_plan(state: &AppState) -> Result<QuotaOverview, String> {
-    let (api_key, provider_name) = current_provider_creds(&state.db)?;
-    fetch_bigmodel_quota(state, &api_key, &provider_name).await
+    let (api_key, provider_name) = current_provider_creds()?;
+    fetch_zhipu_quota(state, &api_key, &provider_name, "https://bigmodel.cn", None).await
 }
 
 #[tauri::command]
@@ -326,19 +337,48 @@ async fn run_template_quota(
     let config = config_file::read_config().map_err(|e| e.to_string())?;
     let api_key = config_file::provider_api_key(&config, provider_key).unwrap_or_default();
     let base = config_file::provider_base_url(&config, provider_key).unwrap_or_default();
+    let provider_name = config
+        .get("provider")
+        .and_then(|p| p.get(provider_key))
+        .and_then(|p| p.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(provider_key)
+        .to_string();
+
+    // {{token}}：登录获取的会话 token（keyring 存储）；模板引用了但未获取 → 明确报错
+    let token = crate::commands::token_cmd::read_token(provider_key);
+    let refs_token = tmpl.url.as_deref().map(|s| s.contains("{{token}}")).unwrap_or(false)
+        || tmpl.body.as_deref().map(|s| s.contains("{{token}}")).unwrap_or(false)
+        || tmpl
+            .headers_json
+            .as_deref()
+            .map(|s| s.contains("{{token}}"))
+            .unwrap_or(false);
+    if refs_token && token.is_none() {
+        return Err(
+            "模板引用了 {{token}}，但尚未获取：请到 设置 → 配额查询模板 点「登录获取 Token」".into(),
+        );
+    }
+    let token_s = token.unwrap_or_default();
 
     let url = tmpl
         .url
         .unwrap_or_default()
         .replace("{{apiKey}}", &api_key)
-        .replace("{{baseURL}}", &base);
+        .replace("{{baseURL}}", &base)
+        .replace("{{token}}", &token_s);
     let method = tmpl.method.unwrap_or_else(|| "GET".to_string());
     let client = state.client();
 
     let mut req = if method.eq_ignore_ascii_case("POST") {
-        client
-            .post(&url)
-            .body(tmpl.body.clone().unwrap_or_default())
+        client.post(&url).body(
+            tmpl.body
+                .clone()
+                .unwrap_or_default()
+                .replace("{{apiKey}}", &api_key)
+                .replace("{{baseURL}}", &base)
+                .replace("{{token}}", &token_s),
+        )
     } else {
         client.get(&url)
     };
@@ -352,7 +392,8 @@ async fn run_template_quota(
                     req = req.header(
                         k,
                         s.replace("{{apiKey}}", &api_key)
-                            .replace("{{baseURL}}", &base),
+                            .replace("{{baseURL}}", &base)
+                            .replace("{{token}}", &token_s),
                     );
                 }
             }
@@ -386,18 +427,50 @@ async fn run_template_quota(
     let used = used.unwrap_or(0.0);
     let remaining = remaining.unwrap_or_else(|| if total > used { total - used } else { 0.0 });
 
-    Ok(QuotaOverview {
-        source: "template".into(),
-        account_label: None,
-        plan_name: tmpl.name.clone(),
-        buckets: vec![QuotaBucket {
-            name: tmpl.name.unwrap_or_else(|| "配额".into()),
-            total,
-            used,
-            remaining,
+    let mut buckets = vec![QuotaBucket {
+        name: tmpl.name.clone().unwrap_or_else(|| "配额".into()),
+        total,
+        used,
+        remaining,
+        unit: None,
+        period_end: None,
+    }];
+
+    // 月限额（可选，部分供应商才有）：配置了任一 monthly path 且能从同一响应中
+    // 提取到数值时，追加「每月使用额度」桶；未配置 / 提取不到则不追加（展示端不显示）
+    let m_total = tmpl
+        .monthly_total_path
+        .as_deref()
+        .and_then(|p| extract_by_path(&resp, p));
+    let m_used = tmpl
+        .monthly_used_path
+        .as_deref()
+        .and_then(|p| extract_by_path(&resp, p));
+    let m_remaining = tmpl
+        .monthly_remaining_path
+        .as_deref()
+        .and_then(|p| extract_by_path(&resp, p));
+    if m_total.is_some() || m_used.is_some() || m_remaining.is_some() {
+        let m_total = m_total.unwrap_or(0.0);
+        let m_used = m_used.unwrap_or(0.0);
+        let m_remaining =
+            m_remaining.unwrap_or_else(|| if m_total > m_used { m_total - m_used } else { 0.0 });
+        buckets.push(QuotaBucket {
+            name: "每月使用额度".into(),
+            total: m_total,
+            used: m_used,
+            remaining: m_remaining,
             unit: None,
             period_end: None,
-        }],
+        });
+    }
+
+    Ok(QuotaOverview {
+        source: "template".into(),
+        provider_name: Some(provider_name),
+        account_label: None,
+        plan_name: tmpl.name.clone(),
+        buckets,
         fetched_at: chrono::Utc::now().to_rfc3339(),
         error: None,
     })
@@ -412,28 +485,53 @@ pub async fn get_template_quota(
     run_template_quota(state.inner(), &provider_key).await
 }
 
-/// 按供应商查询配额（统一入口）：
-/// 智谱 BigModel 系列 → 内置 bigmodel 配额接口；其余 → 用量查询模板（需用户配置）
+/// 按供应商查询配额核心（统一入口）：
+///   Token Plan 供应商（Kimi/智谱/MiniMax/ZenMax/火山，按 baseURL 自动识别）
+///     → coding_plan 专用查询（自动使用该供应商的 API Key + Base URL）
+///   其余 → 用量查询模板（需用户配置）
+async fn provider_quota(
+    state: &AppState,
+    provider_key: &str,
+) -> Result<QuotaOverview, String> {
+    let config = config_file::read_config().map_err(|e| e.to_string())?;
+    let base = config_file::provider_base_url(&config, provider_key).unwrap_or_default();
+    if let Some(cp) = crate::coding_plan::detect(&base) {
+        return crate::coding_plan::fetch_quota(state, provider_key, cp).await;
+    }
+    // 其余：用量查询模板（未配置则报错，前端显示「未配置用量查询」）
+    run_template_quota(state, provider_key).await
+}
+
+/// 按供应商查询配额（command）
 #[tauri::command]
 pub async fn get_provider_quota(
     state: State<'_, AppState>,
     provider_key: String,
 ) -> Result<QuotaOverview, String> {
-    let config = config_file::read_config().map_err(|e| e.to_string())?;
-    let base = config_file::provider_base_url(&config, &provider_key).unwrap_or_default();
-    let name = config
-        .get("provider")
-        .and_then(|p| p.get(&provider_key))
-        .and_then(|p| p.get("name"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(&provider_key)
-        .to_string();
-    // 智谱 BigModel：走内置配额接口
-    if base.to_ascii_lowercase().contains("bigmodel") {
-        let api_key = config_file::provider_api_key(&config, &provider_key)
-            .ok_or_else(|| "该供应商无 apiKey".to_string())?;
-        return fetch_bigmodel_quota(state.inner(), &api_key, &name).await;
+    provider_quota(state.inner(), &provider_key).await
+}
+
+/// 总览配额（Dashboard / 悬浮球 / 悬浮面板 / 托盘共用的数据源）：
+///   1) 设了主供应商 → 查主供应商（Token Plan 供应商自动查询，其余走其用量模板）
+///   2) 未设置 / 主供应商已从 config 移除 → 回退自动识别智谱 Coding Plan（账号确认）
+pub async fn fetch_overview_quota(state: &AppState) -> Result<QuotaOverview, String> {
+    if let Some(key) = state.db.primary_provider_key().ok().flatten() {
+        let exists = config_file::read_config().ok().is_some_and(|c| {
+            c.get("provider")
+                .and_then(|p| p.as_object())
+                .is_some_and(|m| m.contains_key(&key))
+        });
+        if exists {
+            return provider_quota(state, &key).await;
+        }
     }
-    // 其余：用量查询模板（未配置则报错，前端显示「未配置用量查询」）
-    run_template_quota(state.inner(), &provider_key).await
+    fetch_coding_plan(state).await
+}
+
+/// 总览配额查询（command，主窗口 App 全局轮询调用）
+#[tauri::command]
+pub async fn get_overview_quota(
+    state: State<'_, AppState>,
+) -> Result<QuotaOverview, String> {
+    fetch_overview_quota(state.inner()).await
 }

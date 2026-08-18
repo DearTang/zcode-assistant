@@ -16,8 +16,11 @@ use crate::zcode::paths;
 
 /// 增量游标：已导入的最大 rowid（存于 kv）
 const CURSOR_KEY: &str = "usage_import_cursor";
-/// 数据源切换一次性迁移：清空旧 rollout 数据，从 model_usage 全量重导
-const SOURCE_MIGRATED_KEY: &str = "usage_source_model_usage_v1";
+/// 数据源迁移标记：改数据源或修口径时换 key 名，即可让老用户触发一次清空 + 全量重导。
+/// v1: rollout → model_usage 切换；v2: tps 口径修正（过滤毫秒级计时噪声）；
+/// v3: tps 口径修正（识别整块下发的非流式响应 + 500 tok/s 物理上限）；
+/// v4: 模型名归一化（trim + 小写，合并 GLM-5.2 / glm-5.2 等同名异写）。
+const SOURCE_MIGRATED_KEY: &str = "usage_source_model_usage_v4";
 
 /// 每批拉取行数
 const BATCH: i64 = 2000;
@@ -122,7 +125,7 @@ pub fn sync_usage(db: &Database, full: bool) -> anyhow::Result<UsageSyncResult> 
 }
 
 /// 只读打开 zcode 的 SQLite（WAL 允许并发读，不与 zcode 抢写锁）
-fn open_readonly(path: &Path) -> anyhow::Result<Connection> {
+pub(crate) fn open_readonly(path: &Path) -> anyhow::Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -138,8 +141,12 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, UsageRecord)> {
     let provider_id: String = r
         .get::<_, Option<String>>(3)?
         .unwrap_or_else(|| "(未知)".into());
+    // 模型名归一化：trim + 小写。zcode 不同入口写入的大小写不一致（GLM-5.2 / glm-5.2），
+    // 原样入库会导致分组、筛选、明细里同名模型拆成多行。
     let model_id: String = r
         .get::<_, Option<String>>(4)?
+        .map(|m| m.trim().to_lowercase())
+        .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "(未知)".into());
     let query_source: Option<String> = r.get(5)?;
     let input_tokens: i64 = r.get::<_, Option<i64>>(6)?.unwrap_or(0);
@@ -168,15 +175,31 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, UsageRecord)> {
         })
         .unwrap_or_else(|| "未知".into());
 
-    // 输出速度：优先用「生成耗时 = duration - TTFB」（真实吐字速度），
-    // TTFB 缺失或异常时退化为总耗时
+    // 输出速度：正常流式请求的生成窗口 = 总耗时 − 首 token 等待（TTFB），即真实吐字速度；
+    // TTFB 缺失或异常时退化为总耗时。
+    // 但存在「整块下发」：非流式接口或中转缓冲会把响应攒在服务端，首字节到达时已
+    // 生成完毕（TTFB ≥ 90% 总耗时），随后 100~300ms 传完全部内容 —— 此时总耗时 − TTFB
+    // 只是传输耗时，会把速度放大到数千 tok/s，应改用 TTFB 作为生成窗口（含排队与
+    // 预填充，是速度的保守下界）。
+    // 仅在计时可信时记录：输出 ≥10 tokens、生成窗口 ≥100ms，且不超过 500 tok/s 的
+    // 物理上限（现有模型均达不到，超出视为计时异常）；否则置空。
+    // 否则 1~2ms 的舍入误差会把速度放大到数万 tok/s，0 输出的请求会被算成 0 tok/s。
     let gen_ms = match (duration_ms, ttfb_ms) {
+        (Some(d), Some(t)) if t >= 0 && t <= d && t * 10 >= d * 9 => Some(t), // 整块下发
         (Some(d), Some(t)) if t >= 0 && t < d => Some(d - t),
         _ => duration_ms,
     };
-    let tps = gen_ms
-        .filter(|&g| g > 0)
-        .map(|g| output_tokens as f64 / (g as f64 / 1000.0));
+    let tps = match gen_ms {
+        Some(g) if output_tokens >= 10 && g >= 100 => {
+            let v = output_tokens as f64 / (g as f64 / 1000.0);
+            if v <= 500.0 {
+                Some(v)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
 
     Ok((
         rowid,

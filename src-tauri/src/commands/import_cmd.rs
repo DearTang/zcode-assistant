@@ -31,6 +31,21 @@ struct ParsedProvider {
     models: Vec<String>,
 }
 
+/// 预览：解析出的待导入 provider（不写任何文件），供前端弹窗勾选
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderPreview {
+    /// 解析出的条目 id（同一次解析内唯一，作为勾选 / 导入过滤的标识）
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub base_url: String,
+    pub models: Vec<String>,
+    pub has_api_key: bool,
+    /// 命中的已有 provider key（导入时将覆盖更新该条）
+    pub duplicate_of: Option<String>,
+}
+
 /// 把任意字符串转成合法 slug（小写字母数字，分隔符 -；空则 "provider"）
 fn slugify(s: &str) -> String {
     let s: String = s
@@ -312,24 +327,71 @@ fn resolve_default_dir(source: &str, path: Option<&str>) -> Option<PathBuf> {
     })
 }
 
+/// 按来源解析配置文件（只读不写）
+fn parse_source(source: &str, path: &Path) -> Result<Vec<ParsedProvider>, String> {
+    match source {
+        "opencode" => parse_opencode(path),
+        "claude" => parse_claude(path),
+        "codex" => parse_codex(path),
+        "zcode" => parse_zcode(path),
+        _ => Err(format!("不支持的来源: {source}")),
+    }
+}
+
+/// 解析来源路径（带存在性检查）
+fn resolve_existing_path(source: &str, path: Option<&str>) -> Result<PathBuf, String> {
+    let path = resolve_path(source, path)?;
+    if !path.exists() {
+        return Err(format!("配置文件不存在: {}", path.display()));
+    }
+    Ok(path)
+}
+
+/// 预览导入内容：解析来源配置并标记覆盖关系，不执行任何写入。
+/// 前端弹窗展示全量条目供勾选，确认后再调 import_providers_from 传入选中 id。
+#[tauri::command]
+pub fn preview_providers_from(
+    source: String,
+    path: Option<String>,
+) -> Result<Vec<ProviderPreview>, String> {
+    let path = resolve_existing_path(&source, path.as_deref())?;
+    let parsed = parse_source(&source, &path)?;
+    if parsed.is_empty() {
+        return Err("未从配置中解析到任何 provider".into());
+    }
+    // 读取失败不影响预览，只是无法标记覆盖关系
+    let config = config_file::read_config().unwrap_or(Value::Null);
+    Ok(parsed
+        .into_iter()
+        .map(|p| {
+            let duplicate_of = find_duplicate_provider(&config, &p.base_url, &p.api_key);
+            ProviderPreview {
+                id: p.id,
+                name: p.name,
+                kind: p.kind,
+                base_url: p.base_url,
+                models: p.models,
+                has_api_key: !p.api_key.trim().is_empty(),
+                duplicate_of,
+            }
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub fn import_providers_from(
     source: String,
     path: Option<String>,
+    selected: Option<Vec<String>>,
 ) -> Result<Vec<ImportResult>, String> {
-    let path = resolve_path(&source, path.as_deref())?;
-    if !path.exists() {
-        return Err(format!("配置文件不存在: {}", path.display()));
-    }
-    let parsed = match source.as_str() {
-        "opencode" => parse_opencode(&path)?,
-        "claude" => parse_claude(&path)?,
-        "codex" => parse_codex(&path)?,
-        "zcode" => parse_zcode(&path)?,
-        _ => return Err(format!("不支持的来源: {source}")),
-    };
+    let path = resolve_existing_path(&source, path.as_deref())?;
+    let mut parsed = parse_source(&source, &path)?;
     if parsed.is_empty() {
         return Err("未从配置中解析到任何 provider".into());
+    }
+    // 只导入选中的条目（按 preview 返回的 id 过滤）；None = 全部（向后兼容）
+    if let Some(sel) = selected {
+        parsed.retain(|p| sel.iter().any(|id| id == &p.id));
     }
     let mut results = Vec::new();
     for p in parsed {

@@ -1,17 +1,11 @@
-import { useEffect, useState, type CSSProperties } from "react";
+﻿import { useEffect, useState } from "react";
 import { useTheme } from "../../hooks/useTheme";
 import { IconSun, IconMoon, IconCheck, IconRefresh } from "../../components/icons";
 import { UpdateNotification } from "../../components/UpdateNotification";
-import { zcode, templates, app, updater } from "../../api";
-import type { QuotaTemplate, UpdateInfo, ZcodeConfig } from "../../types";
-
-const field: CSSProperties = {
-  display: "flex",
-  flexDirection: "column",
-  gap: 4,
-  fontSize: "var(--fs-sm)",
-  color: "var(--text-secondary)",
-};
+import { Switch } from "../../components/Switch";
+import { toast } from "../../components/Toast";
+import { zcode, app, updater, prefs as prefsApi, events } from "../../api";
+import type { AppPrefs, UpdateInfo, UsageDisplayMode } from "../../types";
 
 export default function Settings() {
   const { theme, setTheme } = useTheme();
@@ -20,20 +14,51 @@ export default function Settings() {
     running: boolean;
     configDir: string;
   } | null>(null);
-  const [config, setConfig] = useState<ZcodeConfig | null>(null);
-  const [selProvider, setSelProvider] = useState("");
-  const [tmpl, setTmpl] = useState<QuotaTemplate | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
   const [version, setVersion] = useState<string>("");
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(false);
   const [updateDismissed, setUpdateDismissed] = useState(false);
+  const [prefs, setPrefs] = useState<AppPrefs | null>(null);
 
   useEffect(() => {
     zcode.probe().then(setProbe).catch(() => setProbe(null));
-    zcode.getConfig().then(setConfig).catch(() => {});
     app.getVersion().then(setVersion).catch(() => {});
+    // 偏好：初始读取 + 监听变更（托盘菜单切悬浮球时这里同步刷新）
+    prefsApi.get().then(setPrefs).catch(() => {});
+    let un: (() => void) | undefined;
+    events.onPrefsUpdated(setPrefs).then((fn) => (un = fn));
+    return () => un?.();
   }, []);
+
+  const setFloatBallVisible = async (visible: boolean) => {
+    setPrefs((p) => (p ? { ...p, floatBallVisible: visible } : p));
+    try {
+      await prefsApi.setFloatBallVisible(visible);
+    } catch (e: unknown) {
+      toast.error(String(e));
+      prefsApi.get().then(setPrefs).catch(() => {});
+    }
+  };
+
+  const setUsageDisplay = async (mode: UsageDisplayMode) => {
+    setPrefs((p) => (p ? { ...p, usageDisplay: mode } : p));
+    try {
+      await prefsApi.setUsageDisplay(mode);
+    } catch (e: unknown) {
+      toast.error(String(e));
+      prefsApi.get().then(setPrefs).catch(() => {});
+    }
+  };
+
+  const setSwitchRestart = async (enabled: boolean) => {
+    setPrefs((p) => (p ? { ...p, switchRestartZcode: enabled } : p));
+    try {
+      await prefsApi.setSwitchRestart(enabled);
+    } catch (e: unknown) {
+      toast.error(String(e));
+      prefsApi.get().then(setPrefs).catch(() => {});
+    }
+  };
 
   const checkUpdates = async () => {
     setChecking(true);
@@ -56,31 +81,6 @@ export default function Settings() {
     if (updateInfo.hasUpdate) return `发现新版本 v${updateInfo.latestVersion.replace(/^v/, "")}`;
     return "已是最新版本";
   })();
-
-  const loadTemplate = async (key: string) => {
-    setSelProvider(key);
-    try {
-      setTmpl(
-        (await templates.get(key)) ?? {
-          providerKey: key,
-          method: "GET",
-        }
-      );
-    } catch {
-      setTmpl({ providerKey: key, method: "GET" });
-    }
-  };
-  const saveTemplate = async () => {
-    if (!tmpl) return;
-    try {
-      await templates.upsert(tmpl);
-      setMsg("模板已保存");
-    } catch (e: unknown) {
-      setMsg(String(e));
-    }
-  };
-
-  const providers = config ? Object.entries(config.provider) : [];
 
   return (
     <>
@@ -118,6 +118,93 @@ export default function Settings() {
 
       <div className="za-panel za-card-pad">
         <div className="za-section-title">
+          <h3>悬浮球与托盘</h3>
+        </div>
+
+        {/* 悬浮球显示/隐藏 */}
+        <div
+          className="za-row-between"
+          style={{ gap: 10, alignItems: "center" }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: "var(--fs-sm)" }}>显示悬浮球</div>
+            <div className="za-faint" style={{ fontSize: "var(--fs-xs)" }}>
+              常驻桌面的配额监控小球，托盘菜单里也可以切换
+            </div>
+          </div>
+          <Switch
+            on={prefs?.floatBallVisible ?? true}
+            onChange={setFloatBallVisible}
+            title="显示/隐藏悬浮球"
+          />
+        </div>
+
+        {/* 用量展示方案 */}
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: "var(--fs-sm)", color: "var(--text-secondary)" }}>
+            模型用量展示方案
+          </div>
+          <div className="za-row" style={{ gap: 8, marginTop: 6 }}>
+            <button
+              className="za-btn"
+              onClick={() => setUsageDisplay("used")}
+              style={
+                (prefs?.usageDisplay ?? "used") === "used"
+                  ? { borderColor: "var(--accent)", color: "var(--accent)" }
+                  : undefined
+              }
+            >
+              展示已用量
+            </button>
+            <button
+              className="za-btn"
+              onClick={() => setUsageDisplay("remaining")}
+              style={
+                prefs?.usageDisplay === "remaining"
+                  ? { borderColor: "var(--accent)", color: "var(--accent)" }
+                  : undefined
+              }
+            >
+              展示剩余用量
+            </button>
+          </div>
+          <p className="za-faint" style={{ margin: "6px 0 0", fontSize: "var(--fs-xs)" }}>
+            影响悬浮球、悬浮面板与托盘菜单 / tooltip 的百分比口径；颜色始终按已用度分级。
+          </p>
+        </div>
+      </div>
+
+      <div className="za-panel za-card-pad">
+        <div className="za-section-title">
+          <h3>切换行为</h3>
+        </div>
+
+        {/* 切换后提示重启 */}
+        <div
+          className="za-row-between"
+          style={{ gap: 10, alignItems: "center" }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: "var(--fs-sm)" }}>切换后重启 ZCode</div>
+            <div className="za-faint" style={{ fontSize: "var(--fs-xs)" }}>
+              自动切换写入配置与各会话模型选择并自动重启；账号切换完成后弹窗确认
+            </div>
+          </div>
+          <Switch
+            on={prefs?.switchRestartZcode ?? true}
+            onChange={setSwitchRestart}
+            title="切换后重启 ZCode"
+          />
+        </div>
+        <p className="za-faint" style={{ margin: "10px 0 0", fontSize: "var(--fs-xs)" }}>
+          开启时自动切换写入配置与全部符合条件的会话（模型选择 + 供应商配置）并自动重启
+          ZCode，全部对话统一生效；关闭时不重启，各对话在恢复 / 新开时使用新模型，
+          账号切换会直接重启 ZCode。
+        </p>
+      </div>
+
+      <div className="za-panel za-card-pad">
+        <div className="za-section-title">
           <h3>zcode 连接</h3>
         </div>
         {probe ? (
@@ -141,111 +228,6 @@ export default function Settings() {
         )}
       </div>
 
-      {/* 配额查询模板（M3-2） */}
-      <div className="za-panel za-card-pad">
-        <div className="za-section-title">
-          <h3>配额查询模板</h3>
-        </div>
-        <p className="za-muted" style={{ margin: "0 0 12px", fontSize: "var(--fs-sm)" }}>
-          为非 Coding Plan 的自定义 provider 配置配额查询。支持{" "}
-          {"{{apiKey}}/{{baseURL}}"} 变量，按 dot path（如{" "}
-          <span className="za-mono">data.balance.total</span>）提取总额/已用/剩余。
-        </p>
-        <label style={{ ...field, marginBottom: 10 }}>
-          选择 provider
-          <select
-            className="za-select"
-            value={selProvider}
-            onChange={(e) => loadTemplate(e.target.value)}
-          >
-            <option value="">— 选择 —</option>
-            {providers.map(([key, p]) => (
-              <option key={key} value={key}>
-                {p.name}（{p.source === "custom" ? "自定义" : key}）
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {tmpl && (
-          <div className="za-grid za-grid-2" style={{ gap: 10 }}>
-            <label style={field}>
-              名称
-              <input
-                className="za-input"
-                value={tmpl.name ?? ""}
-                onChange={(e) => setTmpl({ ...tmpl, name: e.target.value })}
-              />
-            </label>
-            <label style={field}>
-              方法
-              <select
-                className="za-select"
-                value={tmpl.method ?? "GET"}
-                onChange={(e) => setTmpl({ ...tmpl, method: e.target.value })}
-              >
-                <option value="GET">GET</option>
-                <option value="POST">POST</option>
-              </select>
-            </label>
-            <label style={{ ...field, gridColumn: "1 / -1" }}>
-              URL（支持 {"{{baseURL}}/{{apiKey}}"}）
-              <input
-                className="za-input"
-                value={tmpl.url ?? ""}
-                onChange={(e) => setTmpl({ ...tmpl, url: e.target.value })}
-                placeholder="{{baseURL}}/dashboard/billing/credit_grants"
-              />
-            </label>
-            <label style={{ ...field, gridColumn: "1 / -1" }}>
-              Headers（JSON，值支持 {"{{apiKey}}"}）
-              <textarea
-                className="za-textarea"
-                value={tmpl.headersJson ?? ""}
-                onChange={(e) => setTmpl({ ...tmpl, headersJson: e.target.value })}
-                placeholder='{"Authorization": "Bearer {{apiKey}}"}'
-              />
-            </label>
-            <label style={field}>
-              总额 path
-              <input
-                className="za-input"
-                value={tmpl.totalPath ?? ""}
-                onChange={(e) => setTmpl({ ...tmpl, totalPath: e.target.value })}
-                placeholder="data.total_grants"
-              />
-            </label>
-            <label style={field}>
-              已用 path
-              <input
-                className="za-input"
-                value={tmpl.usedPath ?? ""}
-                onChange={(e) => setTmpl({ ...tmpl, usedPath: e.target.value })}
-                placeholder="data.used"
-              />
-            </label>
-            <label style={field}>
-              剩余 path
-              <input
-                className="za-input"
-                value={tmpl.remainingPath ?? ""}
-                onChange={(e) => setTmpl({ ...tmpl, remainingPath: e.target.value })}
-                placeholder="data.remaining"
-              />
-            </label>
-            <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "flex-end" }}>
-              <button className="za-btn za-btn-sm za-btn-primary" onClick={saveTemplate}>
-                保存模板
-              </button>
-            </div>
-          </div>
-        )}
-        {msg && (
-          <div className="za-muted" style={{ marginTop: 8 }}>
-            {msg}
-          </div>
-        )}
-      </div>
 
       <div className="za-panel za-card-pad">
         <div className="za-section-title">

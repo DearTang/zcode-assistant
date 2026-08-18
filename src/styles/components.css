@@ -4,10 +4,11 @@
  */
 
 /* ===== 玻璃面板 ===== */
+/* 注：内容卡片不使用 backdrop-filter——一个页面 5~10 个卡片各带独立模糊层，
+ * 反复切换视图会累积 GPU 合成压力，实测可致 WebView2 GPU 进程挂起、整窗冻结。
+ * 卡片改用高不透明度玻璃底色，视觉近似；模糊层只保留侧边栏/顶栏两处静态层。 */
 .za-panel {
-  background: var(--glass-bg);
-  backdrop-filter: blur(12px) saturate(150%);
-  -webkit-backdrop-filter: blur(12px) saturate(150%);
+  background: var(--glass-bg-strong);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--glass-highlight), var(--shadow-md);
@@ -219,6 +220,10 @@
 }
 
 /* ===== 开关（button 实现，无原生 checkbox 残影）===== */
+/* 表单内的原生 checkbox（多选场景）统一用强调色，与开关视觉一致 */
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
 .za-switch {
   appearance: none;
   -webkit-appearance: none;

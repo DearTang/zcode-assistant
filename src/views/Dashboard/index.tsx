@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { Progress } from "../../components/Progress";
 import {
   IconRefresh,
@@ -6,7 +6,7 @@ import {
   IconCpu,
   IconUser,
 } from "../../components/icons";
-import { quota, events, formatUnits } from "../../api";
+import { formatUnits } from "../../api";
 import type { QuotaOverview } from "../../types";
 
 function StatCard({
@@ -55,66 +55,23 @@ function StatCard({
   );
 }
 
-export default function Dashboard() {
-  const [data, setData] = useState<QuotaOverview | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = async (silent = false) => {
-    if (!silent) setLoading(true);
-    setError(null);
-    try {
-      const q = await quota.getCodingPlan();
-      setData(q);
-      // 作为唯一数据源，把结果广播给悬浮窗 / 悬浮球 / 托盘
-      events.emitQuotaUpdated(q);
-    } catch (e: unknown) {
-      setError(
-        typeof e === "string" ? e : (e as Error)?.message ?? "配额查询失败"
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-  useEffect(() => {
-    refresh();
-    // 每 5 秒自动静默刷新（唯一查询源，结果广播给所有消费方）
-    const t = setInterval(() => refresh(true), 5000);
-    // 监听刷新请求（托盘菜单 / 悬浮窗刷新按钮转发而来）
-    let un: (() => void) | undefined;
-    events.onRefreshRequested(() => refresh()).then((fn) => (un = fn));
-    return () => {
-      clearInterval(t);
-      un?.();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
+/**
+ * 总览视图：配额数据由 App 的全局轮询（唯一查询源）下发，本组件纯展示。
+ * 刷新按钮触发 App 的查询（non-silent，会广播给悬浮窗 / 托盘）。
+ */
+export default function Dashboard({
+  data,
+  loading,
+  error,
+  onRefresh,
+}: {
+  data: QuotaOverview | null;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+}) {
   return (
     <>
-      {error && (
-        <div
-          className="za-panel za-card-pad"
-          style={{ borderColor: "var(--danger)" }}
-        >
-          <div className="za-row" style={{ gap: 8, marginBottom: 6 }}>
-            <IconZap width={16} height={16} style={{ color: "var(--danger)" }} />
-            <strong>配额查询失败</strong>
-          </div>
-          <div className="za-muted za-mono" style={{ fontSize: "var(--fs-xs)" }}>
-            {error}
-          </div>
-          <div
-            className="za-faint"
-            style={{ fontSize: "var(--fs-xs)", marginTop: 6 }}
-          >
-            提示：配额查询使用 config.json 中「BigModel - Coding Plan」的
-            apiKey（非 zcodejwttoken）。若失败可能是未启用该 provider、apiKey
-            过期或网络/代理问题。
-          </div>
-        </div>
-      )}
-
       <div className="za-grid za-grid-3">
         <StatCard
           icon={<IconUser width={16} height={16} />}
@@ -133,18 +90,20 @@ export default function Dashboard() {
         />
         <StatCard
           icon={<IconZap width={16} height={16} />}
-          label="数据源"
-          value={data?.source ?? "-"}
-          hint="BigModel 使用统计"
+          label="供应商"
+          value={
+            data?.providerName ?? (loading ? "加载中…" : "自动 · 智谱 Coding Plan")
+          }
+          hint={data ? `数据源 ${data.source}` : "未设置主供应商时自动识别"}
         />
       </div>
 
       <div className="za-panel za-card-pad">
         <div className="za-section-title">
-          <h3>Coding Plan 配额</h3>
+          <h3>主供应商配额</h3>
           <button
             className="za-btn za-btn-sm"
-            onClick={() => refresh()}
+            onClick={() => onRefresh()}
             disabled={loading}
           >
             <IconRefresh width={14} height={14} />{" "}
@@ -207,6 +166,11 @@ export default function Dashboard() {
             })}
           {data && data.buckets.length === 0 && (
             <div className="za-empty">暂无配额数据</div>
+          )}
+          {error && (
+            <div className="za-empty" style={{ color: "var(--danger)" }}>
+              配额查询失败：{error}
+            </div>
           )}
           {!data && !error && (
             <div className="za-empty">{loading ? "加载中…" : "暂无数据"}</div>

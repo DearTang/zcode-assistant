@@ -7,8 +7,10 @@ import {
   IconCpu,
   IconSwap,
   IconChart,
+  IconFolder,
   IconUser,
   IconGlobe,
+  IconSparkle,
   IconSettings,
   IconSun,
   IconMoon,
@@ -27,17 +29,28 @@ const NAV: NavEntry[] = [
   { id: "models", label: "模型管理", icon: IconCpu },
   { id: "autoswitch", label: "自动切换", icon: IconSwap },
   { id: "usage", label: "用量查询", icon: IconChart },
+  { id: "projects", label: "项目管理", icon: IconFolder },
   { id: "accounts", label: "智谱账号", icon: IconUser },
   { id: "proxy", label: "网络代理", icon: IconGlobe },
+  { id: "beautify", label: "ZCode 美化", icon: IconSparkle },
   { id: "settings", label: "设置", icon: IconSettings },
 ];
 
 interface SidebarProps {
   current: ViewId;
   onSelect: (id: ViewId) => void;
+  /** 检测到新版本时版本号旁显示小圆点 */
+  updateAvailable?: boolean;
+  /** 点击版本号打开「关于」弹窗（检查更新 / 更新日志） */
+  onOpenAbout?: () => void;
 }
 
-export function Sidebar({ current, onSelect }: SidebarProps) {
+export function Sidebar({
+  current,
+  onSelect,
+  updateAvailable,
+  onOpenAbout,
+}: SidebarProps) {
   const { theme, toggle } = useTheme();
   const [version, setVersion] = useState("");
 
@@ -99,16 +112,14 @@ export function Sidebar({ current, onSelect }: SidebarProps) {
           退出
         </button>
         {version && (
-          <div
-            className="za-faint za-mono"
-            style={{
-              fontSize: "var(--fs-xs)",
-              textAlign: "center",
-              padding: "2px 0",
-            }}
+          <button
+            className="za-version"
+            title={updateAvailable ? "发现新版本，点击查看" : "关于 zcode-assistant"}
+            onClick={() => onOpenAbout?.()}
           >
-            v{version}
-          </div>
+            <span className="za-mono">v{version}</span>
+            {updateAvailable && <span className="za-version-dot" />}
+          </button>
         )}
       </div>
     </aside>

@@ -13,10 +13,11 @@ export function Switch({ on, onChange, disabled, title }: SwitchProps) {
       aria-checked={on}
       title={title}
       disabled={disabled}
-      className="za-switch"
-      data-on={on ? "true" : "false"}
+      className={`za-switch${on ? " is-on" : ""}`}
       onClick={() => !disabled && onChange(!on)}
       style={disabled ? { opacity: 0.4, cursor: "not-allowed" } : undefined}
-    />
+    >
+      <span className="za-switch-thumb" />
+    </button>
   );
 }

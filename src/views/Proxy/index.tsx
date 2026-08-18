@@ -2,6 +2,7 @@ import { useEffect, useState, type CSSProperties } from "react";
 import { proxy as proxyApi } from "../../api";
 import type { ProxyConfig } from "../../types";
 import { Switch } from "../../components/Switch";
+import { toast } from "../../components/Toast";
 
 const field: CSSProperties = {
   display: "flex",
@@ -23,7 +24,6 @@ export default function Proxy() {
   const [pw, setPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [test, setTest] = useState<unknown>(null);
-  const [msg, setMsg] = useState<string | null>(null);
 
   const load = async () => {
     try {
@@ -38,13 +38,12 @@ export default function Proxy() {
 
   const save = async () => {
     setBusy(true);
-    setMsg(null);
     try {
       await proxyApi.set({ ...cfg, hasPassword: pw.length > 0 }, pw || undefined);
-      setMsg("已保存");
+      toast.success("已保存");
       setPw("");
     } catch (e: unknown) {
-      setMsg(typeof e === "string" ? e : "保存失败");
+      toast.error(typeof e === "string" ? e : "保存失败");
     } finally {
       setBusy(false);
     }
@@ -164,11 +163,6 @@ export default function Proxy() {
           {t.ok
             ? `✓ 连通（${t.latencyMs}ms，status ${t.status}）`
             : `✗ ${t.error || "失败"}`}
-        </div>
-      )}
-      {msg && (
-        <div className="za-muted" style={{ marginTop: 8 }}>
-          {msg}
         </div>
       )}
     </div>

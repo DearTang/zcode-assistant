@@ -1,18 +1,23 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { win, events, pickBucketByName, feLog } from "../api";
+import { win, events, prefs as prefsApi, pickRingBuckets, feLog } from "../api";
 import { DualRing } from "../components/DualRing";
-import type { QuotaOverview } from "../types";
+import type { AppPrefs, QuotaOverview } from "../types";
 
 const clamp = (n: number) => Math.max(0, Math.min(100, n));
 
 /**
- * 悬浮球：单击展开面板，拖拽移动。
- * 自定义 tooltip（悬停时显示在球正下方两行：每5小时 / 每周），替掉位置偏右的原生 title。
+ * 悬浮球：悬停 → 展开信息面板（float-panel 独立窗口），双击 → 打开主界面，拖拽 → 移动。
+ * 鼠标离开时通过 float://ball-leave 通知面板延迟隐藏（球与面板是两个 OS 窗口，
+ * 跨窗口 hover 需事件总线协调，否则移到面板途中会触发隐藏）。
  */
 export default function FloatBall() {
   const [data, setData] = useState<QuotaOverview | null>(null);
-  const [hovered, setHovered] = useState(false);
+  const [prefs, setPrefs] = useState<AppPrefs>({
+    floatBallVisible: true,
+    usageDisplay: "used",
+    switchRestartZcode: true,
+  });
 
   useEffect(() => {
     feLog("mounted, label=" + getCurrentWindow().label);
@@ -25,13 +30,24 @@ export default function FloatBall() {
       feLog("onQuotaUpdated listener registered");
       un = fn;
     });
-    return () => un?.();
+    // 展示方案（已用 / 剩余）随设置联动
+    prefsApi.get().then(setPrefs).catch(() => {});
+    let unPrefs: (() => void) | undefined;
+    events.onPrefsUpdated(setPrefs).then((fn) => (unPrefs = fn));
+    return () => {
+      un?.();
+      unPrefs?.();
+    };
   }, []);
 
-  const b5 = pickBucketByName(data, "5小时");
-  const bW = pickBucketByName(data, "每周");
+  // 双环 bucket：智谱取「每5小时 / 每周」，其余供应商（用量模板）回退前两个 bucket
+  const { b5, bW } = pickRingBuckets(data);
   const used5 = b5 && b5.total > 0 ? clamp((b5.used / b5.total) * 100) : null;
   const usedW = bW && bW.total > 0 ? clamp((bW.used / bW.total) * 100) : null;
+  // 中心数字按展示方案：已用占比 或 剩余占比（环弧长同步）
+  const showRemaining = prefs.usageDisplay === "remaining";
+  const shown5 = used5 != null ? (showRemaining ? 100 - used5 : used5) : null;
+  const shownW = usedW != null ? (showRemaining ? 100 - usedW : usedW) : null;
 
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
@@ -66,39 +82,32 @@ export default function FloatBall() {
     window.addEventListener("mouseup", onUp);
   };
 
-  const onClick = async () => {
-    feLog("click → toggleFloatPanel (invoking)");
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (!settled)
-        feLog(
-          "toggleFloatPanel: invoke 未在 2s 内返回 — 后端命令挂起/未响应",
-          "warn"
-        );
-    }, 2000);
-    try {
-      await win.toggleFloatPanel();
-      settled = true;
-      feLog("toggleFloatPanel ok");
-    } catch (e) {
-      settled = true;
-      feLog("toggleFloatPanel ERR: " + String(e), "error");
-    } finally {
-      clearTimeout(timer);
-    }
+  // 悬停 → 显示面板；离开 → 通知面板延迟隐藏（面板自身决定是否真的隐藏）
+  const onMouseEnter = () => {
+    feLog("hover → show_float_panel");
+    win
+      .showFloatPanel()
+      .catch((e) => feLog("showFloatPanel ERR: " + String(e), "error"));
+  };
+  const onMouseLeave = () => {
+    feLog("leave → emit ball-leave");
+    events.emitBallLeave().catch(() => {});
   };
 
-  const tip = (label: string, v: number | null) =>
-    `${label}: ${v != null ? Math.round(v) + "%" : "—"}`;
+  // 双击 → 打开主界面（单击已由悬停展示面板，不再 toggle）
+  const onDoubleClick = () => {
+    feLog("dblclick → showMain");
+    win.showMain().catch((e) => feLog("showMain ERR: " + String(e), "error"));
+  };
 
   return (
     <div className="fb-stage">
       <div
         className="fb-ball"
         onMouseDown={onMouseDown}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        onClick={onClick}
+        onMouseEnter={onMouseEnter}
+        onMouseLeave={onMouseLeave}
+        onDoubleClick={onDoubleClick}
       >
         <div className="fb-inner">
           <div
@@ -109,13 +118,30 @@ export default function FloatBall() {
               placeItems: "center",
             }}
           >
-            <DualRing size={52} usedOuter={used5} usedInner={usedW} />
+            <DualRing
+              size={52}
+              usedOuter={used5}
+              usedInner={usedW}
+              showRemaining={showRemaining}
+            />
           </div>
           <div className="fb-center">
-            {used5 != null ? (
+            {shown5 != null || shownW != null ? (
               <>
-                <span className="fb-pct">{Math.round(used5)}</span>
-                <span className="fb-unit">%</span>
+                {/* 上行：每 5 小时（对应外环，按展示方案为已用或剩余） */}
+                <div className="fb-line">
+                  <span className="fb-pct">
+                    {shown5 != null ? Math.round(shown5) : "—"}
+                  </span>
+                  <span className="fb-unit">%</span>
+                </div>
+                {/* 下行：每周（对应内环） */}
+                <div className="fb-line fb-line-sub">
+                  <span className="fb-pct-sm">
+                    {shownW != null ? Math.round(shownW) : "—"}
+                  </span>
+                  <span className="fb-unit-sm">%</span>
+                </div>
               </>
             ) : (
               <span className="fb-dot" />
@@ -123,12 +149,6 @@ export default function FloatBall() {
           </div>
         </div>
       </div>
-      {hovered && (
-        <div className="fb-tooltip">
-          <div>{tip("每5小时", used5)}</div>
-          <div>{tip("每周", usedW)}</div>
-        </div>
-      )}
     </div>
   );
 }

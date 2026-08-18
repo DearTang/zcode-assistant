@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 import { events, zcode } from "../api";
+import { toast } from "./Toast";
 
 /** 全局重启确认弹窗：监听后端 zcode://restart-requested，确认后重启 zcode */
 export function RestartDialog() {
@@ -21,7 +22,7 @@ export function RestartDialog() {
       await zcode.restartZcode();
       setReason(null);
     } catch (e: unknown) {
-      alert(typeof e === "string" ? e : "重启失败");
+      toast.error(typeof e === "string" ? e : "重启失败");
     } finally {
       setBusy(false);
     }

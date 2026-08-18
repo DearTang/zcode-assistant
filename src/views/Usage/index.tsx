@@ -20,6 +20,7 @@ import type {
   UsageSyncResult,
 } from "../../types";
 import { IconRefresh } from "../../components/icons";
+import { toast } from "../../components/Toast";
 
 type RangePreset = "today" | "7d" | "30d" | "all" | "custom";
 type SortKey =
@@ -65,9 +66,19 @@ function daysAgoStr(n: number): string {
 }
 
 /** 去掉 builtin: 前缀，便于展示 */
+/**
+ * 供应商/分组键的友好显示：
+ * - `builtin:xxx` → 去前缀（bigmodel-coding-plan …）
+ * - UUID（zcode 对自定义/工作区级供应商的内部 id，无法还原名字）→ `自定义·前8位`
+ * - 其余原样返回
+ * 注：raw id 仍用于筛选/分组，此处仅做展示美化。
+ */
 function prettyKey(k: string): string {
   if (!k) return k;
   if (k.startsWith("builtin:")) return k.slice("builtin:".length);
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i.test(k)) {
+    return `自定义·${k.slice(0, 8)}`;
+  }
   return k;
 }
 
@@ -101,7 +112,6 @@ function fmtTime(s?: string): string {
 
 export default function Usage() {
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [syncInfo, setSyncInfo] = useState<UsageSyncResult | null>(null);
 
@@ -115,6 +125,9 @@ export default function Usage() {
   const [selProvider, setSelProvider] = useState("");
   const [selModel, setSelModel] = useState("");
   const [selRole, setSelRole] = useState("");
+
+  // 供应商别名（UUID/builtin -> 可读名，由后端从 transcript 解析）
+  const [labels, setLabels] = useState<Record<string, string>>({});
 
   const [groupBy, setGroupBy] = useState<UsageGroupBy>("provider");
   const [sortKey, setSortKey] = useState<SortKey>("total");
@@ -154,10 +167,23 @@ export default function Usage() {
     [from, to, selProvider, selModel, selRole]
   );
 
+  /** 供应商显示名：transcript 别名 > builtin 去前缀 > UUID 短码 > 原值 */
+  const labelProvider = useCallback(
+    (id: string): string => {
+      if (!id) return "—";
+      if (labels[id]) return labels[id];
+      if (id.startsWith("builtin:")) return id.slice("builtin:".length);
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-/i.test(id)) {
+        return `自定义·${id.slice(0, 8)}`;
+      }
+      return id;
+    },
+    [labels]
+  );
+
   /** 加载汇总 + 聚合（不含 filters） */
   const loadAgg = useCallback(async () => {
     setLoading(true);
-    setError(null);
     try {
       const [ov, ag] = await Promise.all([
         usage.overview(query),
@@ -166,7 +192,7 @@ export default function Usage() {
       setOverview(ov);
       setRows(ag);
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      toast.error(`加载失败：${e?.message ?? String(e)}`);
     } finally {
       setLoading(false);
     }
@@ -181,24 +207,37 @@ export default function Usage() {
     }
   }, []);
 
+  /** 加载供应商别名（启动后台扫描 transcript 后会逐步补全） */
+  const loadLabels = useCallback(async () => {
+    try {
+      setLabels(await usage.providerLabels());
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   /** 同步：默认增量解析最近 30 天；full=true 回填全部历史 */
   const doSync = useCallback(async (full = false) => {
     setSyncing(true);
-    setError(null);
     try {
       const res = await usage.sync(full);
       setSyncInfo(res);
-      await Promise.all([loadFilters(), loadAgg()]);
+      await Promise.all([loadFilters(), loadAgg(), loadLabels()]);
     } catch (e: any) {
-      setError(e?.message ?? String(e));
+      toast.error(`同步失败：${e?.message ?? String(e)}`);
     } finally {
       setSyncing(false);
     }
-  }, [loadFilters, loadAgg]);
+  }, [loadFilters, loadAgg, loadLabels]);
 
   // 挂载：先同步一次（拿到最新数据），再全量加载
   useEffect(() => {
     doSync();
+    // 启动时的 transcript 别名扫描在后台进行，延迟再拉一次 labels 补全
+    const t = setTimeout(() => {
+      loadLabels();
+    }, 3000);
+    return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -356,7 +395,7 @@ export default function Usage() {
               <option value="">全部</option>
               {filters?.providers.map((p) => (
                 <option key={p} value={p}>
-                  {prettyKey(p)}
+                  {labelProvider(p)}
                 </option>
               ))}
             </select>
@@ -406,12 +445,6 @@ export default function Usage() {
         )}
       </div>
 
-      {error && (
-        <div className="za-panel za-card-pad" style={{ color: "var(--danger)" }}>
-          加载失败：{error}
-        </div>
-      )}
-
       {/* 汇总卡片 */}
       <div className="za-panel za-card-pad">
         <div className="za-section-title">
@@ -456,7 +489,7 @@ export default function Usage() {
           <h3>输出速度</h3>
           <span
             className="za-faint"
-            title="输出 tokens ÷ 生成耗时（总耗时 − 首 token 等待 TTFB），即真实吐字速度；TTFB 缺失时退化为总耗时。"
+            title="输出 tokens ÷ 生成耗时。正常流式取「总耗时 − 首 token 等待 TTFB」；若首 token 到达过晚（TTFB ≥ 90% 总耗时，多为非流式或中转整块下发），改用 TTFB 估算，为保守值。仅统计输出 ≥10 tokens、生成耗时 ≥100ms 且 ≤500 tok/s 的请求，计时异常的样本不参与统计。"
             style={{ fontSize: "var(--fs-xs)", cursor: "help" }}
           >
             token/s · 口径说明 ⓘ
@@ -479,7 +512,12 @@ export default function Usage() {
                 key={g.id}
                 className="za-btn za-btn-sm"
                 data-active={groupBy === g.id}
-                onClick={() => setGroupBy(g.id)}
+                onClick={() => {
+                  setGroupBy(g.id);
+                  // 切维度时重置默认排序：日期 → 最新在前，其余 → 总量降序
+                  setSortKey(g.id === "date" ? "label" : "total");
+                  setSortDir("desc");
+                }}
                 style={
                   groupBy === g.id
                     ? {
@@ -514,12 +552,12 @@ export default function Usage() {
                   </th>
                   <th onClick={() => onSort("input")}>输入{sortArrow("input")}</th>
                   <th onClick={() => onSort("output")}>输出{sortArrow("output")}</th>
-                  <th onClick={() => onSort("cache")}>缓存读{sortArrow("cache")}</th>
+                  <th onClick={() => onSort("cache")}>缓存{sortArrow("cache")}</th>
                   <th onClick={() => onSort("total")}>
                     总量{sortArrow("total")}
                   </th>
                   <th onClick={() => onSort("avgTps")}>
-                    平均速{sortArrow("avgTps")}
+                    均速{sortArrow("avgTps")}
                   </th>
                   <th onClick={() => onSort("maxTps")}>最快{sortArrow("maxTps")}</th>
                   <th onClick={() => onSort("minTps")}>最慢{sortArrow("minTps")}</th>
@@ -536,7 +574,9 @@ export default function Usage() {
                   return (
                     <tr key={r.key}>
                       <td className="za-ut-l" title={r.key}>
-                        {prettyKey(r.label)}
+                        {groupBy === "provider"
+                          ? labelProvider(r.label)
+                          : prettyKey(r.label)}
                       </td>
                       <td className="za-mono">{r.calls.toLocaleString()}</td>
                       <td className="za-mono za-faint">
@@ -624,7 +664,7 @@ export default function Usage() {
                       {fmtTime(r.startedAt)}
                     </td>
                     <td className="za-faint" title={r.providerId}>
-                      {prettyKey(r.providerId)}
+                      {labelProvider(r.providerId)}
                     </td>
                     <td>{r.modelId}</td>
                     <td>
