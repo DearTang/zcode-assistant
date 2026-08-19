@@ -7,12 +7,18 @@
   版本号遵循语义化版本（https://semver.org/lang/zh-CN/）。
   发版流程见 AGENTS.md「Slash rule: 打包」；baseline 记录上一次发布的版本，
   用于步骤 3 的 `git diff --stat <baseline>..HEAD` 完整度核对。
-  baseline: v0.1.0
+  baseline: v0.3.0
 -->
 
 # 更新日志
 
 ## [未发布]
+
+### ✨ 新增
+
+- 设置新增「开机自启动」开关：开启后登录系统自动启动 zcode-assistant 并驻留托盘
+  （通过 tauri-plugin-autostart 注册系统自启项；设置页打开时以系统实际状态为准，
+  用户从系统设置中手动关闭后开关会同步回退）。
 
 ## [0.3.0] - 2026-08-18
 
