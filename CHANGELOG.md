@@ -20,6 +20,14 @@
   （通过 tauri-plugin-autostart 注册系统自启项；设置页打开时以系统实际状态为准，
   用户从系统设置中手动关闭后开关会同步回退）。
 
+### 🛠️ 变更
+
+- 应用图标重设计：从默认波形图标换为「Z 字母提示符」（深色靛蓝+青绿渐变，圆角
+  方形，发光滤镜）—— 主符号为字母 `Z` + 光标 `_`，呼应 zcode 字母身份与终端提示
+  语义。设计源 `src-tauri/icons/source.svg`，通过 `npm run icon:gen` + `tauri icon`
+  派生 `app-icon.png` 与全部 bundle / Windows Store / Android / iOS 图标；侧栏与
+  「关于」弹窗的内联 SVG 与 `.za-logo-mark` 配色同步更新。
+
 ## [0.3.0] - 2026-08-18
 
 ### ✨ 新增
