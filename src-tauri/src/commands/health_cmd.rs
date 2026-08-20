@@ -1,7 +1,11 @@
-//! 当前模型可用性检测：GET /models 免费探测（0 token，不发起对话请求）+ 失败指数退避冷却
+//! 供应商配置验证：GET /models 免费探测（0 token，不发起对话请求）+ 失败指数退避冷却
+//!
+//! 口径说明：探测只验证 baseURL + apiKey 的连通性（配置是否正确），
+//! **不代表模型可用 / 额度充足**——额度耗尽、模型下架等状态探测不出来，
+//! 可用性请看额度行徽标。
 //!
 //! 调度模型：前端 App 每 30s 调一次 check_current_health(false)，命令内部做冷却判断——
-//! 冷却期内直接返回缓存、不发网络请求；手动「立即检测」传 force=true 绕过冷却。
+//! 冷却期内直接返回缓存、不发网络请求；手动「立即验证」传 force=true 绕过冷却。
 //! 失败退避：60s → 120s → 300s → 900s → 1800s 封顶；成功后回到常规 30s。
 //! 切换供应商后（缓存 provider 与当前不一致）视同 force，立即重新探测。
 use crate::commands::models_cmd::models_endpoint;
@@ -62,7 +66,7 @@ async fn probe_models(
         let snippet: String = body.chars().take(120).collect();
         return Err(format!("HTTP {}: {}", status.as_u16(), snippet));
     }
-    // 模型数仅用于提示，解析失败不影响「连接可用」的判定
+    // 模型数仅用于提示，解析失败不影响「配置有效」的判定
     let v: Value = resp.json().await.unwrap_or(Value::Null);
     Ok(v.get("data")
         .and_then(|d| d.as_array())
@@ -70,8 +74,8 @@ async fn probe_models(
         .map(|a| a.len()))
 }
 
-/// 检测当前选中供应商的可用性。
-/// force=true 绕过冷却立即探测（手动「立即检测」）；否则冷却期内直接返回缓存。
+/// 验证当前选中供应商的配置。
+/// force=true 绕过冷却立即探测（手动「立即验证」）；否则冷却期内直接返回缓存。
 #[tauri::command]
 pub async fn check_current_health(
     app: AppHandle,
@@ -83,7 +87,7 @@ pub async fn check_current_health(
     run_health_check(&app, state.inner(), &key, force).await
 }
 
-/// 手动检测指定供应商（模型卡片 ⚡ 立即检测）：绕过冷却直接探测，
+/// 手动验证指定供应商（模型卡片 ⚡ 立即验证）：绕过冷却直接探测，
 /// 结果由前端 toast 通知。非当前供应商不写缓存（缓存语义 = 当前供应商，
 /// 供 App 30s 轮询冷却复用，避免污染退避计数）。
 #[tauri::command]
@@ -134,7 +138,7 @@ async fn run_health_check(
             provider_key: key.to_string(),
             provider_name,
             ok: false,
-            message: "未配置 apiKey，无法检测".into(),
+            message: "未配置 apiKey，无法验证".into(),
             checked_at: now,
             next_check_at: now,
             fail_count: 0,
@@ -147,8 +151,16 @@ async fn run_health_check(
     let url = models_endpoint(&base);
     let client = state.client();
     let (ok, message, fail_count) = match probe_models(&client, &url, &api_key).await {
-        Ok(Some(n)) => (true, format!("连接成功，发现 {n} 个模型"), 0),
-        Ok(None) => (true, "连接成功".to_string(), 0),
+        Ok(Some(n)) => (
+            true,
+            format!("连接成功，发现 {n} 个模型（仅验证配置，不代表模型可用/额度）"),
+            0,
+        ),
+        Ok(None) => (
+            true,
+            "连接成功（仅验证配置，不代表模型可用/额度）".to_string(),
+            0,
+        ),
         Err(e) => (false, e, prev_fail_count + 1),
     };
     let next_check_at = if ok {

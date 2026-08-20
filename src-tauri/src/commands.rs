@@ -2,6 +2,7 @@
 pub mod accounts_cmd;
 pub mod autoswitch_cmd;
 pub mod beautify_cmd;
+pub mod export_cmd;
 pub mod health_cmd;
 pub mod import_cmd;
 pub mod models_cmd;

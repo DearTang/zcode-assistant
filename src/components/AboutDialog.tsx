@@ -141,7 +141,7 @@ export function AboutDialog({
               strokeLinecap="round"
               strokeLinejoin="round"
             >
-              <path d="M3 17l5-6 4 3 8-9" />
+              <path d="M7 7 L17 7 L7 17 L17 17" />
             </svg>
           </div>
           <div style={{ flex: 1 }}>

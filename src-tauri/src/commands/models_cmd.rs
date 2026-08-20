@@ -44,6 +44,31 @@ pub fn builtin_model_specs() -> Vec<ModelSpec> {
         .collect()
 }
 
+/// 内置智谱规格表查询（大小写不敏感）：命中返回 (context, output)
+pub(crate) fn builtin_spec(model_id: &str) -> Option<(i64, i64)> {
+    let id = model_id.trim().to_lowercase();
+    BUILTIN
+        .iter()
+        .find(|(b, _, _)| *b == id)
+        .map(|(_, c, o)| (*c, *o))
+}
+
+/// 解析模型真实规格（权威值，命中即应覆盖已有配置）：
+/// OpenRouter 目录模糊匹配 → 内置智谱规格表。
+/// 命中返回 Some((context, output))；output 仅内置表命中时有值。
+pub(crate) fn matched_spec(
+    catalog: &Option<crate::openrouter::Catalog>,
+    model_id: &str,
+) -> Option<(i64, Option<i64>)> {
+    if let Some(ctx) = catalog
+        .as_ref()
+        .and_then(|c| crate::openrouter::fuzzy_context(&c.models, model_id))
+    {
+        return Some((ctx, None));
+    }
+    builtin_spec(model_id).map(|(c, o)| (c, Some(o)))
+}
+
 /// 拼 /models 端点（智谱 anthropic 端点用 paas/v4，其余按 OpenAI 兼容约定）
 /// 供拉取模型 / 连接测试 / 可用性健康检测共用
 pub(crate) fn models_endpoint(base: &str) -> String {
@@ -369,10 +394,12 @@ pub fn reorder_providers(ordered_keys: Vec<String>) -> Result<(), String> {
     config_file::write_config(&config).map_err(|e| e.to_string())
 }
 
-/// 拖拽排序后重排某 provider 下 models 的键顺序（写回 config.json）。
+/// 拖拽排序后重排某 provider 下 models 的顺序（写回 config.json）。
 ///
 /// 与 reorder_providers 同款「槽位重排」：ordered_names 中的模型在原有槽位里
 /// 按新顺序填入，未包含的模型保持原位。依赖 serde_json 的 preserve_order。
+/// 同时按最终顺序写入每个模型的 zcode.priority + zcode.modified=true——
+/// ZCode 按这两个字段决定模型展示顺序与本地条目存留，仅键顺序不生效。
 #[tauri::command]
 pub fn reorder_models(
     provider_key: String,
@@ -420,6 +447,23 @@ pub fn reorder_models(
             new_map.insert(name.clone(), v.clone());
         }
     }
+
+    // 除键顺序外，还要写入每个模型的 zcode.priority（按新顺序 0,1,2...）与
+    // zcode.modified=true：ZCode 读取后按 sortModelEntriesByPriority 以
+    // zcode.priority 升序展示（无 priority 的排在最后，键顺序仅作兜底），且
+    // 与服务端下发的权威模型条目合并时，只有 modified=true 的本地条目会保留。
+    // 只调键顺序不写 priority，ZCode 侧不会生效。
+    for (i, name) in new_all.iter().enumerate() {
+        let Some(v) = new_map.get_mut(name) else { continue };
+        let Some(obj) = v.as_object_mut() else { continue };
+        let zcode = obj
+            .entry("zcode".to_string())
+            .or_insert_with(|| json!({}));
+        let Some(zobj) = zcode.as_object_mut() else { continue };
+        zobj.insert("priority".into(), json!(i as i64));
+        zobj.insert("modified".into(), json!(true));
+    }
+
     let obj = provider
         .as_object_mut()
         .ok_or_else(|| "provider 非对象".to_string())?;

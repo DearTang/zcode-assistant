@@ -1,7 +1,7 @@
 {
   "name": "zcode-assistant",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "type": "module",
   "description": "zcode 使用增强工具：配额监控、模型管理、自动切换、悬浮球、账号切换",
   "scripts": {
@@ -13,6 +13,7 @@
     "tauri:build": "tauri build",
     "test:ts": "tsc --noEmit",
     "version:sync": "node scripts/sync-version.mjs",
+    "icon:gen": "node scripts/generate-icon.mjs",
     "release:gitee": "node scripts/publish-gitee-release.mjs",
     "release:github": "node scripts/publish-github-release.mjs"
   },
@@ -24,6 +25,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@tauri-apps/cli": "^2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

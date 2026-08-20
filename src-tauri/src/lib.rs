@@ -32,6 +32,11 @@ pub fn run() {
             }
             let _ = app.emit("app://second-instance", ());
         }))
+        // 开机自启动：注册 / 注销系统自启项（Windows 注册表 / macOS LaunchAgent / Linux .desktop）
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .setup(|app| {
             // 数据目录 + SQLite + 共享 HTTP 客户端（注入代理）
             let data_dir = app.path().app_data_dir()?;
@@ -113,11 +118,12 @@ pub fn run() {
             commands::window::restart_app,
             commands::window::set_tray_icon,
             commands::window::fe_log,
-            // 应用偏好（悬浮球显隐 / 用量展示方案 / 切换后提示重启）
+            // 应用偏好（悬浮球显隐 / 用量展示方案 / 切换后提示重启 / 开机自启）
             commands::prefs_cmd::get_prefs,
             commands::prefs_cmd::set_float_ball_visible,
             commands::prefs_cmd::set_usage_display,
             commands::prefs_cmd::set_switch_restart_zcode,
+            commands::prefs_cmd::set_autostart,
             // zcode 配置 / 探测 / 重启 / 切换
             commands::zcode_cmd::get_zcode_config,
             commands::zcode_cmd::get_zcode_setting,
@@ -146,7 +152,11 @@ pub fn run() {
             // 导入配置
             commands::import_cmd::preview_providers_from,
             commands::import_cmd::import_providers_from,
+            commands::import_cmd::resolve_import_contexts,
             commands::import_cmd::pick_config_file,
+            // 反向同步（导出到 opencode / cc-switch）
+            commands::export_cmd::export_preview,
+            commands::export_cmd::export_providers_to,
             // 当前模型可用性检测（check_provider_health：模型卡片 ⚡ 手动检测指定供应商）
             commands::health_cmd::check_current_health,
             commands::health_cmd::check_provider_health,

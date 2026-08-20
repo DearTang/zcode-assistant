@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   importer,
+  exporter,
   models,
   zcode,
   quota,
@@ -14,7 +15,13 @@ import {
   pickBucketByName,
   usageColor,
 } from "../../api";
-import type { ImportResult, ProviderPreview } from "../../api";
+import type {
+  ImportResult,
+  ProviderPreview,
+  ExportPreview,
+  ExportOutcome,
+} from "../../api";
+import type { UsageDisplayMode } from "../../types";
 import {
   PRESET_PROVIDERS,
   PRESET_CATEGORY_LABELS,
@@ -31,6 +38,7 @@ import {
   IconStar,
 } from "../../components/icons";
 import { RestartBar } from "../../components/RestartBar";
+import { Switch } from "../../components/Switch";
 import { DualRing } from "../../components/DualRing";
 import { toast } from "../../components/Toast";
 import type {
@@ -78,7 +86,12 @@ export function detectCodingPlan(base: string): {
   return null;
 }
 
-export default function Models() {
+export default function Models({
+  usageDisplay = "used",
+}: {
+  /** 模型用量展示方案（与总览/悬浮球同源）：已用 / 剩余 */
+  usageDisplay?: UsageDisplayMode;
+}) {
   const [config, setConfig] = useState<ZcodeConfig | null>(null);
   const [setting, setSetting] = useState<ZcodeSetting | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -90,6 +103,16 @@ export default function Models() {
   const [impResults, setImpResults] = useState<ImportResult[] | null>(null);
   // 预览弹窗：解析出的待导入 provider 列表（null=弹窗关闭）
   const [impPreview, setImpPreview] = useState<ProviderPreview[] | null>(null);
+  // 「重新获取上下文」开关：仅当次导入生效，导入完成后自动还原为关（启动默认关）
+  const [impRefetchCtx, setImpRefetchCtx] = useState(false);
+  // 未命中模型的上下文确认弹窗（null=关闭）：待导入条目 id + 未命中模型清单
+  const [ctxConfirm, setCtxConfirm] = useState<{
+    ids: string[];
+    unmatched: string[];
+  } | null>(null);
+  // 反向同步（zcode → cc-switch 的 opencode 供应商组）
+  const [expPreview, setExpPreview] = useState<ExportPreview[] | null>(null);
+  const [expOutcome, setExpOutcome] = useState<ExportOutcome | null>(null);
   // 本次会话新导入的 provider key（仅内存，退出应用即清，用于 NEW 标记）
   const [newKeys, setNewKeys] = useState<Set<string>>(() => new Set());
   // 双击打开的供应商编辑弹窗 key
@@ -204,16 +227,17 @@ export default function Models() {
     };
   }, [config, builtinKey]);
 
-  // ⚡ 立即检测指定供应商连接（GET /models 免费探测，绕过冷却），
-  // 结果走通知栏 toast；卡片本身不再单独占行展示检测状态（可用性由额度行徽标呈现）
+  // ⚡ 验证指定供应商配置（GET /models 免费探测，绕过冷却），
+  // 结果走通知栏 toast；卡片本身不再单独占行展示检测状态（额度由额度行徽标呈现）。
+  // 注意：探测只验证 baseURL + apiKey 连通性，不代表模型可用 / 额度充足
   const checkProvider = async (key: string, name: string) => {
-    toast.success(`正在检测「${name}」连接…`);
+    toast.success(`正在验证「${name}」配置…`);
     try {
       const r = await health.checkProvider(key);
-      if (r.ok) toast.success(`「${name}」连接可用：${r.message}`);
-      else toast.warning(`「${name}」连接不可用：${r.message}`);
+      if (r.ok) toast.success(`「${name}」配置有效：${r.message}`);
+      else toast.warning(`「${name}」配置验证失败：${r.message}`);
     } catch (e: unknown) {
-      toast.error(typeof e === "string" ? e : "检测失败");
+      toast.error(typeof e === "string" ? e : "验证失败");
     }
   };
 
@@ -272,13 +296,20 @@ export default function Models() {
   };
 
   // 预览弹窗确认：只导入选中的条目
-  const handleImportConfirm = async (ids: string[]) => {
+  // 实际执行导入并处理结果（refetch=「重新获取上下文」；overrides=未命中模型的确认值）
+  const runImport = async (
+    ids: string[],
+    refetch: boolean,
+    overrides?: Record<string, number>
+  ) => {
     setBusy(true);
     try {
       const results = await importer.from(
         impSource,
         impPath.trim() || undefined,
-        ids
+        ids,
+        refetch,
+        overrides
       );
       setImpPreview(null);
       setImpResults(results);
@@ -308,6 +339,35 @@ export default function Models() {
       toast.error(typeof e === "string" ? e : "导入失败");
     } finally {
       setBusy(false);
+      // 「重新获取上下文」仅当次生效：导入完成（无论成败）后自动还原为关
+      setImpRefetchCtx(false);
+    }
+  };
+
+  // 预览弹窗确认：开关关闭直接导入；开启先目录匹配，
+  // 未命中的弹窗让用户逐个确认（默认 200k）后再导入
+  const handleImportConfirm = async (ids: string[]) => {
+    if (!impRefetchCtx) {
+      await runImport(ids, false);
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await importer.resolveContexts(
+        impSource,
+        impPath.trim() || undefined,
+        ids
+      );
+      setBusy(false);
+      if (res.unmatched.length === 0) {
+        await runImport(ids, true);
+      } else {
+        setCtxConfirm({ ids, unmatched: res.unmatched });
+      }
+    } catch (e: unknown) {
+      toast.error(typeof e === "string" ? e : "解析模型上下文失败");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -317,6 +377,48 @@ export default function Models() {
       if (picked) setImpPath(picked);
     } catch {
       /* 用户取消或不可用，忽略 */
+    }
+  };
+
+  // 反向同步：预览 zcode 可导出的供应商（标记 cc-switch 侧覆盖关系），不写入
+  const handleExport = async () => {
+    setBusy(true);
+    setExpOutcome(null);
+    try {
+      const items = await exporter.preview();
+      setExpPreview(items);
+    } catch (e: unknown) {
+      toast.error(typeof e === "string" ? e : "解析 zcode 配置失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // 同步确认：只导出勾选的供应商（统一写 cc-switch 的 opencode 供应商组）
+  const handleExportConfirm = async (ids: string[]) => {
+    setBusy(true);
+    try {
+      const outcome = await exporter.to(ids);
+      setExpPreview(null);
+      setExpOutcome(outcome);
+      const added = outcome.results.filter((r) => r.status === "success");
+      const updated = outcome.results.filter((r) => r.status === "updated");
+      if (added.length > 0) {
+        toast.success(`已新增 ${added.length} 个供应商到 cc-switch`);
+      }
+      if (updated.length > 0) {
+        toast.success(`已覆盖更新 ${updated.length} 个供应商`);
+      }
+      if (outcome.warning) {
+        toast.warning(outcome.warning);
+      }
+      if (added.length === 0 && updated.length === 0) {
+        toast.error("未成功导出任何供应商");
+      }
+    } catch (e: unknown) {
+      toast.error(typeof e === "string" ? e : "同步失败");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -419,6 +521,14 @@ export default function Models() {
               <IconClose width={13} height={13} />
             </button>
           )}
+          <label
+            className="za-row"
+            style={{ gap: 6, alignItems: "center", fontSize: "var(--fs-sm)", cursor: "pointer" }}
+            title="开启后本次导入按 OpenRouter 目录 / 内置规格表匹配真实上下文并覆盖旧值；未命中的模型弹窗逐个确认（默认 200k，可修改）。仅当次生效，导入完成后自动关闭"
+          >
+            <Switch on={impRefetchCtx} onChange={setImpRefetchCtx} />
+            重新获取上下文
+          </label>
           <button
             className="za-btn za-btn-sm za-btn-primary"
             disabled={busy}
@@ -490,6 +600,95 @@ export default function Models() {
                   ))}
                 </div>
               )}
+            </div>
+          );
+        })()}
+      </div>
+
+      {/* 反向同步：zcode 配置导出到 cc-switch */}
+      <div className="za-panel za-card-pad">
+        <div className="za-section-title">
+          <h3>同步到 cc-switch</h3>
+        </div>
+        <p
+          className="za-muted"
+          style={{ margin: "0 0 10px", fontSize: "var(--fs-sm)" }}
+        >
+          把 zcode 的自定义供应商（含模型与上下文限制）同步到 cc-switch（其 opencode
+          供应商组，app_type='opencode'，切换供应商时由 cc-switch 落到 opencode.json）。
+          baseURL + apiKey 一致的条目覆盖更新，其余新增；写入前自动备份数据库（.bak）。
+        </p>
+        <div className="za-row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            className="za-btn za-btn-sm za-btn-primary"
+            disabled={busy}
+            onClick={handleExport}
+          >
+            同步到 cc-switch
+          </button>
+        </div>
+        {expOutcome && expOutcome.results.length > 0 && (() => {
+          const succ = expOutcome.results.filter((r) => r.status === "success");
+          const upd = expOutcome.results.filter((r) => r.status === "updated");
+          const fail = expOutcome.results.filter((r) => r.status === "failed");
+          return (
+            <div style={{ marginTop: 10 }}>
+              <div
+                className="za-row"
+                style={{ gap: 14, fontSize: "var(--fs-sm)" }}
+              >
+                <span style={{ color: "var(--accent)" }}>
+                  ✓ 新增 {succ.length}
+                </span>
+                <span style={{ color: "var(--accent)" }}>
+                  ↻ 覆盖 {upd.length}
+                </span>
+                <span style={{ color: "#ef4444" }}>✕ 失败 {fail.length}</span>
+              </div>
+              {expOutcome.warning && (
+                <div
+                  className="za-muted"
+                  style={{ fontSize: "var(--fs-xs)", marginTop: 6 }}
+                >
+                  ⚠ {expOutcome.warning}
+                </div>
+              )}
+              <div
+                className="za-mono"
+                style={{
+                  fontSize: "var(--fs-xs)",
+                  marginTop: 6,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 3,
+                }}
+              >
+                {[...succ, ...upd, ...fail].map((r, i) => (
+                  <div
+                    // eslint-disable-next-line react/no-array-index-key
+                    key={`${r.name}-${i}`}
+                    className="za-row"
+                    style={{ gap: 6 }}
+                  >
+                    <span
+                      style={{
+                        color:
+                          r.status === "failed"
+                            ? "#ef4444"
+                            : r.status === "updated"
+                              ? "var(--accent)"
+                              : "var(--text-tertiary)",
+                      }}
+                    >
+                      {r.status === "failed" ? "✕" : r.status === "updated" ? "↻" : "✓"}
+                    </span>
+                    <span style={{ color: "var(--text-primary)" }}>
+                      {r.name}
+                    </span>
+                    <span className="za-muted">— {r.message}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           );
         })()}
@@ -639,7 +838,7 @@ export default function Models() {
                           e.stopPropagation();
                           await checkProvider(bKey, bProv.name);
                         }}
-                        title="立即检测此供应商连接（GET /models，不消耗 token）"
+                        title="验证此供应商配置（GET /models，只验证 baseURL/apiKey 连通性，不消耗 token；不代表模型可用或额度充足）"
                       >
                         <IconZap width={13} height={13} />
                       </button>
@@ -650,6 +849,7 @@ export default function Models() {
                     isBigmodel={(bProv.options?.baseURL ?? "")
                       .toLowerCase()
                       .includes("bigmodel")}
+                    usageDisplay={usageDisplay}
                   />
                 </div>
               );
@@ -802,8 +1002,8 @@ export default function Models() {
                         e.stopPropagation();
                         await checkProvider(key, p.name);
                       }}
-                      title="立即检测此供应商连接（GET /models，不消耗 token）"
-                    >
+                      title="验证此供应商配置（GET /models，只验证 baseURL/apiKey 连通性，不消耗 token；不代表模型可用或额度充足）"
+                      >
                       <IconZap width={13} height={13} />
                     </button>
                     <Toggle
@@ -833,6 +1033,7 @@ export default function Models() {
                   isBigmodel={(p.options?.baseURL ?? "")
                     .toLowerCase()
                     .includes("bigmodel")}
+                  usageDisplay={usageDisplay}
                 />
               </div>
             );
@@ -874,7 +1075,201 @@ export default function Models() {
           onConfirm={handleImportConfirm}
         />
       )}
+
+      {/* 未命中模型的上下文确认：逐个填写（默认 200k）后继续导入 */}
+      {ctxConfirm && (
+        <ContextConfirmModal
+          models={ctxConfirm.unmatched}
+          busy={busy}
+          onClose={() => setCtxConfirm(null)}
+          onConfirm={(overrides) => {
+            const { ids } = ctxConfirm;
+            setCtxConfirm(null);
+            runImport(ids, true, overrides);
+          }}
+        />
+      )}
+
+      {/* 同步预览：勾选要导出的供应商后再执行写入 */}
+      {expPreview && (
+        <ExportPreviewModal
+          items={expPreview}
+          busy={busy}
+          onClose={() => setExpPreview(null)}
+          onConfirm={handleExportConfirm}
+        />
+      )}
     </>
+  );
+}
+
+/* ============ 同步到 cc-switch：预览弹窗（默认勾选 zcode 中启用的供应商）============ */
+function ExportPreviewModal({
+  items,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  items: ExportPreview[];
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: (ids: string[]) => void;
+}) {
+  const [sel, setSel] = useState<Set<string>>(
+    () => new Set(items.filter((i) => i.enabled).map((i) => i.id))
+  );
+  const all = sel.size === items.length;
+  const allIds = () => new Set(items.map((i) => i.id));
+  const toggle = (id: string, on: boolean) =>
+    setSel((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  return (
+    <div className="za-modal-overlay" onClick={onClose}>
+      <div
+        className="za-glass-strong za-modal"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="za-modal-header">
+          <div className="za-row" style={{ gap: 8, alignItems: "center" }}>
+            <h3 style={{ margin: 0, fontSize: "var(--fs-lg)", fontWeight: 600 }}>
+              同步到 cc-switch
+            </h3>
+            <span className="za-muted" style={{ fontSize: "var(--fs-sm)" }}>
+              共 {items.length} 个可导出供应商
+            </span>
+          </div>
+          <button
+            className="za-icon-btn"
+            style={{ width: 28, height: 28 }}
+            onClick={onClose}
+            title="关闭"
+          >
+            <IconClose width={14} height={14} />
+          </button>
+        </div>
+
+        <div className="za-modal-body">
+          <div className="za-row" style={{ gap: 8, marginBottom: 8 }}>
+            <button
+              className="za-btn za-btn-sm"
+              onClick={() => setSel(all ? new Set() : allIds())}
+            >
+              {all ? "取消全选" : "全选"}
+            </button>
+            <span className="za-muted" style={{ fontSize: "var(--fs-sm)" }}>
+              已选 {sel.size} / {items.length}（默认仅勾选 zcode 中启用的）
+            </span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {items.map((it) => {
+              const checked = sel.has(it.id);
+              return (
+                <label
+                  key={it.id}
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    alignItems: "flex-start",
+                    padding: "6px 8px",
+                    borderRadius: 6,
+                    cursor: "pointer",
+                    background: checked
+                      ? "var(--accent-subtle)"
+                      : "transparent",
+                    border: "1px solid var(--glass-border)",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    style={{ marginTop: 3, flexShrink: 0 }}
+                    checked={checked}
+                    onChange={(e) => toggle(it.id, e.target.checked)}
+                  />
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 2,
+                      minWidth: 0,
+                      flex: 1,
+                    }}
+                  >
+                    <div
+                      className="za-row"
+                      style={{ gap: 6, flexWrap: "wrap" }}
+                    >
+                      <span style={{ fontWeight: 500 }}>{it.name}</span>
+                      {it.duplicateOf ? (
+                        <span
+                          className="za-badge"
+                          style={{
+                            background: "rgba(245,158,11,0.15)",
+                            color: "#F59E0B",
+                          }}
+                          title={`baseURL + apiKey 与目标供应商一致，同步将覆盖更新「${it.duplicateOf}」`}
+                        >
+                          覆盖 {it.duplicateOf}
+                        </span>
+                      ) : (
+                        <span className="za-badge za-badge-new">新增</span>
+                      )}
+                      {!it.enabled && (
+                        <span
+                          className="za-badge za-badge-neutral"
+                          title="该供应商在 zcode 中处于禁用状态"
+                        >
+                          已禁用
+                        </span>
+                      )}
+                      {!it.hasApiKey && (
+                        <span
+                          className="za-badge za-badge-neutral"
+                          title="zcode 配置中无 apiKey，目标侧同样不含 key"
+                        >
+                          无 apiKey
+                        </span>
+                      )}
+                    </div>
+                    <span
+                      className="za-mono za-faint"
+                      style={{
+                        fontSize: "var(--fs-xs)",
+                        wordBreak: "break-all",
+                      }}
+                    >
+                      {it.baseUrl}
+                    </span>
+                    <span className="za-faint" style={{ fontSize: "var(--fs-xs)" }}>
+                      {it.modelCount > 0
+                        ? `${it.modelCount} 个模型`
+                        : "无模型"}
+                    </span>
+                  </div>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="za-modal-footer">
+          <button className="za-btn za-btn-sm" disabled={busy} onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="za-btn za-btn-sm za-btn-primary"
+            disabled={busy || sel.size === 0}
+            onClick={() => onConfirm([...sel])}
+          >
+            {busy ? "同步中…" : `同步 ${sel.size} 项`}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -882,9 +1277,12 @@ export default function Models() {
 function ProviderQuotaRow({
   quota,
   isBigmodel,
+  usageDisplay = "used",
 }: {
   quota: QuotaOverview | null | undefined;
   isBigmodel: boolean;
+  /** 模型用量展示方案（与总览/悬浮球同源）：已用 / 剩余 */
+  usageDisplay?: UsageDisplayMode;
 }) {
   if (quota === undefined) return <QuotaPlaceholder text="额度查询中…" />;
   if (quota === null) {
@@ -896,6 +1294,17 @@ function ProviderQuotaRow({
       />
     );
   }
+  // 展示方案：数字与环弧长随方案（已用 / 剩余），颜色始终按已用度分级
+  const showRemaining = usageDisplay === "remaining";
+  /** 按方案格式化单桶占比（% 单位取整）或绝对量 */
+  const fmtBucket = (b: { unit?: string | null; used: number; total: number; remaining: number }) => {
+    if (b.unit === "%") {
+      return showRemaining
+        ? `${Math.round(b.remaining)}%`
+        : `${b.total > 0 ? Math.round((b.used / b.total) * 100) : 0}%`;
+    }
+    return showRemaining ? formatUnits(b.remaining) : formatUnits(b.used);
+  };
   const b5 = pickBucketByName(quota, "5小时");
   const bW = pickBucketByName(quota, "每周");
   // 月限额桶（可选）：名为「每月…」且排除智谱的「MCP每月额度」（那是工具调用次数，不是模型月限额）
@@ -903,26 +1312,21 @@ function ProviderQuotaRow({
     (b) => b.name.includes("每月") && !b.name.includes("MCP")
   );
   const monthlyPart = bM
-    ? ` · 每月 剩${
-        bM.unit === "%"
-          ? `${Math.round(bM.remaining)}%`
-          : formatUnits(bM.remaining)
-      }`
+    ? ` · 每月 ${showRemaining ? "剩" : "已用"}${fmtBucket(bM)}`
     : "";
   const monthlyOk = !bM || bM.remaining > 0;
   // 智谱 BigModel：每5小时 + 每周（部分供应商再追加每月）
   if (b5 || bW) {
     const u5 = b5 && b5.total > 0 ? (b5.used / b5.total) * 100 : null;
     const uW = bW && bW.total > 0 ? (bW.used / bW.total) * 100 : null;
+    const word = showRemaining ? "剩" : "已用";
     const summary =
       b5 && bW
-        ? `每5小时 剩${Math.round(b5.remaining)}% · 每周 剩${Math.round(
-            bW.remaining
-          )}%`
+        ? `每5小时 ${word}${fmtBucket(b5)} · 每周 ${word}${fmtBucket(bW)}`
         : b5
-          ? `每5小时 剩${Math.round(b5.remaining)}%`
+          ? `每5小时 ${word}${fmtBucket(b5)}`
           : bW
-            ? `每周 剩${Math.round(bW.remaining)}%`
+            ? `每周 ${word}${fmtBucket(bW)}`
             : "无额度数据";
     // 可用性只判定实际存在的 bucket：部分供应商没有周限额（只有 5 小时窗口），
     // 缺失的 bucket 不参与判定，否则会被误标「不可用」
@@ -936,7 +1340,12 @@ function ProviderQuotaRow({
         className="za-row"
         style={{ gap: 8, alignItems: "center", paddingLeft: 22 }}
       >
-        <DualRing size={28} usedOuter={u5} usedInner={uW} />
+        <DualRing
+          size={28}
+          usedOuter={u5}
+          usedInner={uW}
+          showRemaining={showRemaining}
+        />
         <span className="za-mono" style={{ fontSize: "var(--fs-xs)" }}>
           {summary}
           {monthlyPart}
@@ -958,16 +1367,19 @@ function ProviderQuotaRow({
   if (b) {
     const usedPct = b.total > 0 ? (b.used / b.total) * 100 : null;
     const summary =
-      (b.unit === "%"
-        ? `剩 ${Math.round(b.remaining)}%`
-        : `剩 ${formatUnits(b.remaining)}`) + monthlyPart;
+      `${showRemaining ? "剩" : "已用"} ${fmtBucket(b)}` + monthlyPart;
     const ok = b.remaining > 0 && monthlyOk;
     return (
       <div
         className="za-row"
         style={{ gap: 8, alignItems: "center", paddingLeft: 22 }}
       >
-        <DualRing size={28} usedOuter={usedPct} usedInner={null} />
+        <DualRing
+          size={28}
+          usedOuter={usedPct}
+          usedInner={null}
+          showRemaining={showRemaining}
+        />
         <span className="za-mono" style={{ fontSize: "var(--fs-xs)" }}>
           {summary}
         </span>
@@ -2428,6 +2840,123 @@ function ProviderEditModal({
               保存供应商
             </button>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============ 未命中模型的上下文确认弹窗（默认 200k，可修改）============ */
+function ContextConfirmModal({
+  models,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  models: string[];
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: (overrides: Record<string, number>) => void;
+}) {
+  const [values, setValues] = useState<Record<string, number>>(() =>
+    Object.fromEntries(models.map((m) => [m, 200000]))
+  );
+  const setValue = (m: string, raw: string) => {
+    const n = Math.max(1, Math.floor(Number(raw) || 0));
+    setValues((prev) => ({ ...prev, [m]: n }));
+  };
+
+  return (
+    <div className="za-modal-overlay" onClick={onClose}>
+      <div
+        className="za-glass-strong za-modal"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="za-modal-header">
+          <div className="za-row" style={{ gap: 8, alignItems: "center" }}>
+            <h3 style={{ margin: 0, fontSize: "var(--fs-lg)", fontWeight: 600 }}>
+              确认模型上下文
+            </h3>
+            <span className="za-muted" style={{ fontSize: "var(--fs-sm)" }}>
+              {models.length} 个模型未匹配到目录
+            </span>
+          </div>
+          <button
+            className="za-icon-btn"
+            style={{ width: 28, height: 28 }}
+            onClick={onClose}
+            title="关闭"
+          >
+            <IconClose width={14} height={14} />
+          </button>
+        </div>
+
+        <div className="za-modal-body">
+          <p
+            className="za-muted"
+            style={{ margin: "0 0 8px", fontSize: "var(--fs-sm)" }}
+          >
+            以下模型在 OpenRouter 目录与内置规格表中均未命中，请确认上下文长度（已预填
+            200000，可修改；其余命中的模型将按目录真实值写入）。
+          </p>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+              maxHeight: 320,
+              overflowY: "auto",
+            }}
+          >
+            {models.map((m) => (
+              <div
+                key={m}
+                className="za-row"
+                style={{
+                  gap: 8,
+                  alignItems: "center",
+                  padding: "6px 8px",
+                  borderRadius: 6,
+                  border: "1px solid var(--glass-border)",
+                }}
+              >
+                <span
+                  className="za-mono"
+                  style={{
+                    fontSize: "var(--fs-xs)",
+                    flex: 1,
+                    minWidth: 0,
+                    wordBreak: "break-all",
+                  }}
+                  title={m}
+                >
+                  {m}
+                </span>
+                <input
+                  type="number"
+                  className="za-input"
+                  style={{ width: 140, height: 28 }}
+                  min={1}
+                  step={1000}
+                  value={values[m]}
+                  onChange={(e) => setValue(m, e.target.value)}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="za-modal-footer">
+          <button className="za-btn za-btn-sm" disabled={busy} onClick={onClose}>
+            取消
+          </button>
+          <button
+            className="za-btn za-btn-sm za-btn-primary"
+            disabled={busy}
+            onClick={() => onConfirm(values)}
+          >
+            {busy ? "导入中…" : "确认并导入"}
+          </button>
         </div>
       </div>
     </div>

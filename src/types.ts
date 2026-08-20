@@ -131,6 +131,8 @@ export interface AppPrefs {
   usageDisplay: UsageDisplayMode;
   /** 自动切换 / 账号切换完成后是否提示重启 ZCode（默认 true） */
   switchRestartZcode: boolean;
+  /** 是否开机自启动（默认 false） */
+  autostart: boolean;
 }
 
 /** 主窗口视图 id */
@@ -378,6 +380,8 @@ export interface UsageRecord {
 /** 同步扫描结果 */
 export interface UsageSyncResult {
   newCount: number;
+  /** 对账回收数：zcode 侧已清理、本地顺带删除的记录条数 */
+  removedCount: number;
   totalCount: number;
   scannedFiles: number;
   minDate?: string;

@@ -38,9 +38,19 @@ pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
-/// 覆盖启动：结束当前进程并重新拉起（单实例弹窗「覆盖启动」按钮调用）
+/// 覆盖启动：结束当前进程并重新拉起（单实例弹窗「覆盖启动」按钮调用）。
+/// dev 模式（tauri dev）下应用进程退出会连带结束整个 dev 会话——tauri CLI
+/// 随之关闭并杀掉 Vite，重新拉起的进程成为孤儿、页面再也刷不出 localhost。
+/// 因此 debug 构建改为仅重载主窗口页面（后端代码本就会由 watcher 热重编译重启）。
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
+    if cfg!(debug_assertions) {
+        log::info!("dev 模式：跳过进程重启，仅重载主窗口页面");
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.eval("window.location.reload()");
+        }
+        return;
+    }
     app.restart();
 }
 

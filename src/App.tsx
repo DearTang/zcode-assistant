@@ -164,6 +164,7 @@ export default function App() {
     floatBallVisible: true,
     usageDisplay: "used",
     switchRestartZcode: true,
+    autostart: false,
   });
   const prefsRef = useRef(prefs);
   useEffect(() => {
@@ -232,9 +233,10 @@ export default function App() {
                 loading={quotaLoading}
                 error={quotaError}
                 onRefresh={() => refreshQuota()}
+                usageDisplay={prefs.usageDisplay}
               />
             )}
-            {view === "models" && <Models />}
+            {view === "models" && <Models usageDisplay={prefs.usageDisplay} />}
             {view === "autoswitch" && <AutoSwitch />}
             {view === "usage" && <Usage />}
             {view === "projects" && <Projects />}

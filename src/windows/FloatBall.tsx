@@ -17,6 +17,7 @@ export default function FloatBall() {
     floatBallVisible: true,
     usageDisplay: "used",
     switchRestartZcode: true,
+    autostart: false,
   });
 
   useEffect(() => {

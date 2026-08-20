@@ -60,6 +60,16 @@ export default function Settings() {
     }
   };
 
+  const setAutostart = async (enabled: boolean) => {
+    setPrefs((p) => (p ? { ...p, autostart: enabled } : p));
+    try {
+      await prefsApi.setAutostart(enabled);
+    } catch (e: unknown) {
+      toast.error(String(e));
+      prefsApi.get().then(setPrefs).catch(() => {});
+    }
+  };
+
   const checkUpdates = async () => {
     setChecking(true);
     try {
@@ -84,6 +94,30 @@ export default function Settings() {
 
   return (
     <>
+      <div className="za-panel za-card-pad">
+        <div className="za-section-title">
+          <h3>通用</h3>
+        </div>
+
+        {/* 开机自启动 */}
+        <div
+          className="za-row-between"
+          style={{ gap: 10, alignItems: "center" }}
+        >
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: "var(--fs-sm)" }}>开机自启动</div>
+            <div className="za-faint" style={{ fontSize: "var(--fs-xs)" }}>
+              登录系统后自动启动并驻留托盘
+            </div>
+          </div>
+          <Switch
+            on={prefs?.autostart ?? false}
+            onChange={setAutostart}
+            title="开机自启动"
+          />
+        </div>
+      </div>
+
       <div className="za-panel za-card-pad">
         <div className="za-section-title">
           <h3>外观</h3>
@@ -138,40 +172,41 @@ export default function Settings() {
             title="显示/隐藏悬浮球"
           />
         </div>
+      </div>
 
-        {/* 用量展示方案 */}
-        <div style={{ marginTop: 14 }}>
-          <div style={{ fontSize: "var(--fs-sm)", color: "var(--text-secondary)" }}>
-            模型用量展示方案
-          </div>
-          <div className="za-row" style={{ gap: 8, marginTop: 6 }}>
-            <button
-              className="za-btn"
-              onClick={() => setUsageDisplay("used")}
-              style={
-                (prefs?.usageDisplay ?? "used") === "used"
-                  ? { borderColor: "var(--accent)", color: "var(--accent)" }
-                  : undefined
-              }
-            >
-              展示已用量
-            </button>
-            <button
-              className="za-btn"
-              onClick={() => setUsageDisplay("remaining")}
-              style={
-                prefs?.usageDisplay === "remaining"
-                  ? { borderColor: "var(--accent)", color: "var(--accent)" }
-                  : undefined
-              }
-            >
-              展示剩余用量
-            </button>
-          </div>
-          <p className="za-faint" style={{ margin: "6px 0 0", fontSize: "var(--fs-xs)" }}>
-            影响悬浮球、悬浮面板与托盘菜单 / tooltip 的百分比口径；颜色始终按已用度分级。
-          </p>
+      <div className="za-panel za-card-pad">
+        <div className="za-section-title">
+          <h3>模型用量展示方案</h3>
         </div>
+
+        <div className="za-row" style={{ gap: 8 }}>
+          <button
+            className="za-btn"
+            onClick={() => setUsageDisplay("used")}
+            style={
+              (prefs?.usageDisplay ?? "used") === "used"
+                ? { borderColor: "var(--accent)", color: "var(--accent)" }
+                : undefined
+            }
+          >
+            展示已用量
+          </button>
+          <button
+            className="za-btn"
+            onClick={() => setUsageDisplay("remaining")}
+            style={
+              prefs?.usageDisplay === "remaining"
+                ? { borderColor: "var(--accent)", color: "var(--accent)" }
+                : undefined
+            }
+          >
+            展示剩余用量
+          </button>
+        </div>
+        <p className="za-faint" style={{ margin: "8px 0 0", fontSize: "var(--fs-xs)" }}>
+          统一控制总览、供应商管理额度行、悬浮球、悬浮面板与托盘菜单 / tooltip
+          的百分比口径；颜色始终按已用度分级。
+        </p>
       </div>
 
       <div className="za-panel za-card-pad">

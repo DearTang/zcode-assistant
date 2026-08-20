@@ -39,11 +39,11 @@
   background: linear-gradient(
     135deg,
     var(--accent),
-    oklch(0.55 0.16 190)
+    oklch(0.55 0.18 280)
   );
   display: grid;
   place-items: center;
-  color: var(--accent-fg);
+  color: var(--text-primary);
   box-shadow: 0 0 16px oklch(0.72 0.15 180 / 0.35);
   flex-shrink: 0;
 }

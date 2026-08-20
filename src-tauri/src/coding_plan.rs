@@ -446,7 +446,9 @@ fn volc_region(base: &str) -> String {
         .to_string()
 }
 
-/// 签名并发起控制面 POST（空 body），返回 JSON（已检查错误包络）
+/// 签名并发起控制面 POST（空 body），返回 JSON（已检查错误包络）。
+/// 火山网关对签名 / 凭据错误常直接返 HTTP 400/403 且 body 才带
+/// ResponseMetadata.Error 信封，不能只按状态码报错（对齐 cc-switch）。
 async fn volc_signed_post(
     state: &AppState,
     ak: &str,
@@ -477,7 +479,7 @@ async fn volc_signed_post(
         "HMAC-SHA256 Credential={ak}/{scope}, SignedHeaders={VOLC_SIGNED_HEADERS}, Signature={signature}"
     );
 
-    let resp: Value = state
+    let http = state
         .client()
         .post(format!("https://{VOLC_HOST}/?{query}"))
         .header("X-Date", &x_date)
@@ -487,33 +489,73 @@ async fn volc_signed_post(
         .body(String::new())
         .send()
         .await
-        .map_err(|e| format!("{action} 请求失败: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("{action} 请求失败: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("{action} 响应解析失败: {e}"))?;
-
-    let err = resp
+        .map_err(|e| format!("{action} 请求失败: {e}"))?;
+    let status = http.status();
+    let body_txt = http.text().await.unwrap_or_default();
+    let v: Value = serde_json::from_str(&body_txt).map_err(|e| {
+        format!(
+            "{action} 响应解析失败（HTTP {}）: {e}",
+            status.as_u16()
+        )
+    })?;
+    let err = v
         .get("ResponseMetadata")
         .and_then(|m| m.get("Error"))
-        .or_else(|| resp.get("Error"));
+        .or_else(|| v.get("Error"));
     if let Some(err) = err {
-        let code = err.get("Code").and_then(|v| v.as_str()).unwrap_or("");
-        let msg = err.get("Message").and_then(|v| v.as_str()).unwrap_or("未知错误");
-        return Err(format!("{action} 失败（{code}）: {msg}"));
+        return Err(volc_error(action, err, status.as_u16()));
     }
-    Ok(resp)
+    if !status.is_success() {
+        let snippet: String = body_txt.chars().take(200).collect();
+        return Err(format!(
+            "{action} 请求失败: HTTP {} {}",
+            status.as_u16(),
+            snippet
+        ));
+    }
+    Ok(v)
 }
 
-/// 火山额度桶级别名 → 显示名
+/// 火山错误分类：鉴权 / 签名 / 权限类给出账号级 AK/SK 引导，其余原样透传
+fn volc_error(action: &str, err: &Value, status: u16) -> String {
+    let code = err.get("Code").and_then(|v| v.as_str()).unwrap_or("");
+    let msg = err
+        .get("Message")
+        .and_then(|v| v.as_str())
+        .unwrap_or("未知错误");
+    let c = code.to_lowercase();
+    if [
+        "auth",
+        "signature",
+        "accessdenied",
+        "invalidauthorization",
+        "missingauthorization",
+        "sigv4",
+        "token",
+    ]
+    .iter()
+    .any(|k| c.contains(k))
+    {
+        return format!(
+            "{action} 鉴权失败（HTTP {status}，{code}）: {msg}。火山额度查询需**账号级** \
+             AccessKey（IAM 访问密钥，非模型 API Key），请到 模型管理 → 火山方舟 → \
+             用量查询模板 核对 AccessKeyId / SecretAccessKey 是否正确且具备 ark 只读权限"
+        );
+    }
+    format!("{action} 失败（HTTP {status}，{code}）: {msg}")
+}
+
+/// 火山额度桶级别名 → 显示名（口径对齐 cc-switch：精确匹配窗口关键词集合）
 fn volc_level_name(level: &str) -> String {
-    let l = level.to_lowercase();
-    if l.contains("session") || l.contains("five") || l.contains("5") {
+    let l = level.trim().to_lowercase();
+    if ["session", "5h", "fivehour", "five_hour", "rolling_5h"]
+        .iter()
+        .any(|k| l.contains(k))
+    {
         "每5小时使用额度".to_string()
-    } else if l.contains("week") {
+    } else if ["weekly", "week", "7d"].iter().any(|k| l.contains(k)) {
         "每周使用额度".to_string()
-    } else if l.contains("month") {
+    } else if ["monthly", "month"].iter().any(|k| l.contains(k)) {
         "每月使用额度".to_string()
     } else {
         level.to_string()
@@ -529,46 +571,45 @@ async fn query_volcengine(
 ) -> Result<QuotaOverview, String> {
     let region = volc_region(base);
 
-    // 1) Agent Plan（绝对值：Quota/Used）
+    // 1) Agent Plan（绝对值：Quota/Used）；Result 缺失时退回顶层解析（对齐 cc-switch）
     let mut plan_name: Option<String> = None;
     let mut buckets: Vec<QuotaBucket> = Vec::new();
     if let Ok(afp) = volc_signed_post(state, ak, sk, &region, "GetAFPUsage").await {
-        if let Some(result) = afp.get("Result") {
-            if let Some(t) = result.get("PlanType").and_then(|v| v.as_str()) {
-                plan_name = Some(format!("Agent Plan {t}"));
-            }
-            for (key, label) in [
-                ("AFPFiveHour", "每5小时使用额度"),
-                ("AFPWeekly", "每周使用额度"),
-                ("AFPMonthly", "每月使用额度"),
-            ] {
-                let q = match result.get(key) {
-                    Some(q) => q,
-                    None => continue,
-                };
-                let quota = match q.get("Quota").and_then(num_or_str) {
-                    Some(v) if v > 0.0 => v,
-                    _ => continue,
-                };
-                let used = q.get("Used").and_then(num_or_str).unwrap_or(0.0);
-                buckets.push(QuotaBucket {
-                    name: label.to_string(),
-                    total: quota,
-                    used,
-                    remaining: (quota - used).max(0.0),
-                    unit: None,
-                    period_end: extract_reset_time(q.get("ResetTime")),
-                });
-            }
+        let result = afp.get("Result").unwrap_or(&afp);
+        if let Some(t) = result.get("PlanType").and_then(|v| v.as_str()) {
+            plan_name = Some(format!("Agent Plan {t}"));
+        }
+        for (key, label) in [
+            ("AFPFiveHour", "每5小时使用额度"),
+            ("AFPWeekly", "每周使用额度"),
+            ("AFPMonthly", "每月使用额度"),
+        ] {
+            let q = match result.get(key) {
+                Some(q) => q,
+                None => continue,
+            };
+            let quota = match q.get("Quota").and_then(num_or_str) {
+                Some(v) if v > 0.0 => v,
+                _ => continue,
+            };
+            let used = q.get("Used").and_then(num_or_str).unwrap_or(0.0);
+            buckets.push(QuotaBucket {
+                name: label.to_string(),
+                total: quota,
+                used,
+                remaining: (quota - used).max(0.0),
+                unit: None,
+                period_end: extract_reset_time(q.get("ResetTime")),
+            });
         }
     }
 
     // 2) 无 Agent Plan 数据 → Coding Plan（百分比）
+    let mut last_raw = String::new();
     if buckets.is_empty() {
         let cp = volc_signed_post(state, ak, sk, &region, "GetCodingPlanUsage").await?;
-        let result = cp
-            .get("Result")
-            .ok_or_else(|| "GetCodingPlanUsage 响应无 Result".to_string())?;
+        last_raw = serde_json::to_string(&cp).unwrap_or_default();
+        let result = cp.get("Result").unwrap_or(&cp);
         let arr = ["QuotaUsage", "Usages", "Details"]
             .iter()
             .find_map(|k| result.get(k).and_then(|v| v.as_array()))
@@ -592,7 +633,11 @@ async fn query_volcengine(
     }
 
     if buckets.is_empty() {
-        return Err("火山方舟未返回可用额度数据（可能未订阅 Coding / Agent Plan）".into());
+        // 带原始响应片段，便于区分「未订阅」与「响应结构变化」（对齐 cc-switch）
+        let snippet: String = last_raw.chars().take(300).collect();
+        return Err(format!(
+            "火山方舟未返回可用额度数据（可能未订阅 Coding / Agent Plan）。原始响应: {snippet}"
+        ));
     }
     Ok(QuotaOverview {
         source: "coding-plan".into(),

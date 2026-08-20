@@ -438,6 +438,8 @@ export default function Usage() {
             共 {syncInfo.totalCount.toLocaleString()} 条记录
             {syncInfo.scannedFiles > 0 &&
               ` · 本次拉取 ${syncInfo.scannedFiles} 条 · 新增 ${syncInfo.newCount}`}
+            {syncInfo.removedCount > 0 &&
+              ` · 对账回收 ${syncInfo.removedCount} 条（zcode 侧已删除）`}
             {syncInfo.minDate && syncInfo.maxDate
               ? ` · 数据范围 ${syncInfo.minDate} ~ ${syncInfo.maxDate}`
               : ""}

@@ -115,7 +115,7 @@ pub struct AutoSwitchLog {
     pub created_at: String,
 }
 
-/// 应用偏好：悬浮球可见性 + 配额展示方案 + 切换后是否提示重启（持久化于 DB kv 表）
+/// 应用偏好：悬浮球可见性 + 配额展示方案 + 切换后是否提示重启 + 开机自启（持久化于 DB kv 表）
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPrefs {
@@ -126,6 +126,8 @@ pub struct AppPrefs {
     /// 自动切换 / 账号切换完成后是否提示重启 ZCode（默认 true：
     /// ZCode 机制限制下免重启仅当前会话生效，重启后全部会话生效）
     pub switch_restart_zcode: bool,
+    /// 是否开机自启动（默认 false：用户需主动在设置中开启）
+    pub autostart: bool,
 }
 
 // ===== 用量查询（解析 ~/.zcode/cli/rollout 逐次模型调用记录）=====
@@ -158,6 +160,8 @@ pub struct UsageRecord {
 #[serde(rename_all = "camelCase")]
 pub struct UsageSyncResult {
     pub new_count: usize,
+    /// 对账回收数：zcode 侧已清理、本地顺带删除的记录条数
+    pub removed_count: usize,
     pub total_count: i64,
     pub scanned_files: usize,
     pub min_date: Option<String>,

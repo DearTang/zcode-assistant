@@ -1,6 +1,6 @@
 [package]
 name = "zcode-assistant"
-version = "0.3.0"
+version = "0.4.0"
 description = "zcode 使用增强工具"
 authors = ["zcode-assistant"]
 edition = "2021"
@@ -16,6 +16,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 # 单实例：启动时检测已有实例，弹窗选择重启或保持现有（新实例自动退出）
 tauri-plugin-single-instance = "2"
+# 开机自启动：注册 / 注销系统自启项（Windows 注册表 / macOS LaunchAgent）
+tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 # 对外请求（配额查询 / 模型列表 / 更新检查），rustls 免 OpenSSL，socks 为 M4 代理预留，

@@ -1,11 +1,21 @@
 //! 从其他 AI 工具的配置导入 provider 到 zcode
 //! 支持：opencode (opencode.json)、Claude Code (settings.json)、Codex (config.toml)
 //! qwen-code 用 OAuth 无 apiKey 可导入；ccswitch 本机未装也暂不支持。
-use crate::commands::models_cmd::{add_provider, apply_models, update_provider, ModelSpec};
+//!
+//! 「重新获取上下文」（refetch_context）开启时：目录/内置表命中的模型覆盖为真实
+//! 上下文；未命中的由前端弹窗让用户逐个确认（context_overrides 携带确认值，
+//! 缺失时 200k 兜底）。开关关闭时不写任何上下文（保留已有配置）。
+use crate::commands::models_cmd::{add_provider, apply_models, matched_spec, update_provider, ModelSpec};
+use crate::state::AppState;
 use crate::zcode::config_file;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tauri::State;
+
+/// 未匹配目录且用户未给确认值时的兜底上下文（与弹窗默认值一致）
+const IMPORT_FALLBACK_CONTEXT: i64 = 200_000;
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -347,6 +357,110 @@ fn resolve_existing_path(source: &str, path: Option<&str>) -> Result<PathBuf, St
     Ok(path)
 }
 
+/// 构建导入模型规格：
+/// - refetch 关闭：不写上下文（apply_models 保留已有配置）
+/// - refetch 开启：目录/内置表命中 → 覆盖为真实值（含输出上限）；
+///   未命中 → 用户弹窗确认值（context_overrides），无确认值时 200k 兜底
+/// 返回 (spec, 是否走了用户确认值/兜底)
+fn import_spec(
+    catalog: &Option<crate::openrouter::Catalog>,
+    id: &str,
+    refetch: bool,
+    overrides: &HashMap<String, i64>,
+) -> (ModelSpec, bool) {
+    if !refetch {
+        return (
+            ModelSpec {
+                id: id.to_string(),
+                name: None,
+                context_length: None,
+                max_output: None,
+            },
+            false,
+        );
+    }
+    if let Some((ctx, out)) = matched_spec(catalog, id) {
+        return (
+            ModelSpec {
+                id: id.to_string(),
+                name: None,
+                context_length: Some(ctx),
+                max_output: out,
+            },
+            false,
+        );
+    }
+    let ctx = overrides
+        .get(id)
+        .copied()
+        .filter(|c| *c > 0)
+        .unwrap_or(IMPORT_FALLBACK_CONTEXT);
+    (
+        ModelSpec {
+            id: id.to_string(),
+            name: None,
+            context_length: Some(ctx),
+            max_output: None,
+        },
+        true,
+    )
+}
+
+/// 目录匹配的单个模型（真实上下文）
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedModel {
+    pub id: String,
+    pub context: i64,
+    /// 输出上限（仅内置规格表命中时有）
+    pub output: Option<i64>,
+}
+
+/// 上下文预解析结果：matched=目录/内置表命中（将按真实值写入），
+/// unmatched=未命中（前端弹窗让用户逐个确认，默认 200k）
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveContextsResult {
+    pub matched: Vec<ResolvedModel>,
+    pub unmatched: Vec<String>,
+}
+
+/// 预解析导入模型的上下文（「重新获取上下文」开启、导入确认前调用）：
+/// 只做匹配不写任何文件，供前端弹窗展示未命中清单。
+#[tauri::command]
+pub fn resolve_import_contexts(
+    state: State<'_, AppState>,
+    source: String,
+    path: Option<String>,
+    selected: Option<Vec<String>>,
+) -> Result<ResolveContextsResult, String> {
+    let p = resolve_existing_path(&source, path.as_deref())?;
+    let mut parsed = parse_source(&source, &p)?;
+    if let Some(sel) = selected {
+        parsed.retain(|prov| sel.iter().any(|id| id == &prov.id));
+    }
+    let or_catalog = crate::openrouter::load_catalog(&state.db);
+    let mut seen = std::collections::HashSet::new();
+    let mut matched = Vec::new();
+    let mut unmatched = Vec::new();
+    for prov in &parsed {
+        for m in &prov.models {
+            if !seen.insert(m.clone()) {
+                continue;
+            }
+            match matched_spec(&or_catalog, m) {
+                Some((ctx, out)) => matched.push(ResolvedModel {
+                    id: m.clone(),
+                    context: ctx,
+                    output: out,
+                }),
+                None => unmatched.push(m.clone()),
+            }
+        }
+    }
+    Ok(ResolveContextsResult { matched, unmatched })
+}
+
 /// 预览导入内容：解析来源配置并标记覆盖关系，不执行任何写入。
 /// 前端弹窗展示全量条目供勾选，确认后再调 import_providers_from 传入选中 id。
 #[tauri::command]
@@ -380,9 +494,12 @@ pub fn preview_providers_from(
 
 #[tauri::command]
 pub fn import_providers_from(
+    state: State<'_, AppState>,
     source: String,
     path: Option<String>,
     selected: Option<Vec<String>>,
+    refetch_context: Option<bool>,
+    context_overrides: Option<HashMap<String, i64>>,
 ) -> Result<Vec<ImportResult>, String> {
     let path = resolve_existing_path(&source, path.as_deref())?;
     let mut parsed = parse_source(&source, &path)?;
@@ -393,6 +510,10 @@ pub fn import_providers_from(
     if let Some(sel) = selected {
         parsed.retain(|p| sel.iter().any(|id| id == &p.id));
     }
+    // 「重新获取上下文」开启时按目录/内置表覆盖真实值，未命中的用弹窗确认值
+    let refetch = refetch_context.unwrap_or(false);
+    let overrides = context_overrides.unwrap_or_default();
+    let or_catalog = crate::openrouter::load_catalog(&state.db);
     let mut results = Vec::new();
     for p in parsed {
         // 先读一份配置快照用于重复检测
@@ -442,21 +563,34 @@ pub fn import_providers_from(
                 });
                 continue;
             }
-            // 合并写入源里的模型（保留已有限制，只加/更新）
+            // 合并写入源里的模型（保留已有限制，只加/更新）；
+            // 「重新获取上下文」开启时：命中的覆盖为真实值，未命中的用确认值
+            let mut resolved = 0usize;
+            let mut confirmed = 0usize;
             let model_count = if !p.models.is_empty() {
-                let specs: Vec<ModelSpec> = p
-                    .models
-                    .iter()
-                    .map(|m| ModelSpec {
-                        id: m.clone(),
-                        name: None,
-                        context_length: None,
-                        max_output: None,
-                    })
-                    .collect();
+                let mut specs = Vec::with_capacity(p.models.len());
+                for m in &p.models {
+                    let (s, user_set) = import_spec(&or_catalog, m, refetch, &overrides);
+                    if user_set {
+                        confirmed += 1;
+                    } else if refetch {
+                        resolved += 1;
+                    }
+                    specs.push(s);
+                }
                 apply_models(existing.clone(), specs).unwrap_or(0)
             } else {
                 0
+            };
+            let ctx_note = if refetch {
+                let confirmed_part = if confirmed > 0 {
+                    format!("、{confirmed} 个按确认值设置")
+                } else {
+                    String::new()
+                };
+                format!("，上下文：{resolved} 个按目录更新{confirmed_part}")
+            } else {
+                String::new()
             };
             results.push(ImportResult {
                 name: p.name.clone(),
@@ -466,7 +600,7 @@ pub fn import_providers_from(
                 source: source.clone(),
                 status: "updated".into(),
                 provider_key: existing,
-                message: format!("已覆盖「{existing_name}」，合并 {model_count} 个模型"),
+                message: format!("已覆盖「{existing_name}」，合并 {model_count} 个模型{ctx_note}"),
             });
             continue;
         }
@@ -505,19 +639,32 @@ pub fn import_providers_from(
             new_id.clone(),
         ) {
             Ok(key) => {
+                // 「重新获取上下文」开启时：命中的写真实值，未命中的用确认值
+                let mut resolved = 0usize;
+                let mut confirmed = 0usize;
                 if !p.models.is_empty() {
-                    let specs: Vec<ModelSpec> = p
-                        .models
-                        .iter()
-                        .map(|m| ModelSpec {
-                            id: m.clone(),
-                            name: None,
-                            context_length: None,
-                            max_output: None,
-                        })
-                        .collect();
+                    let mut specs = Vec::with_capacity(p.models.len());
+                    for m in &p.models {
+                        let (s, user_set) = import_spec(&or_catalog, m, refetch, &overrides);
+                        if user_set {
+                            confirmed += 1;
+                        } else if refetch {
+                            resolved += 1;
+                        }
+                        specs.push(s);
+                    }
                     let _ = apply_models(key.clone(), specs);
                 }
+                let ctx_note = if refetch {
+                    let confirmed_part = if confirmed > 0 {
+                        format!("、{confirmed} 个按确认值设置")
+                    } else {
+                        String::new()
+                    };
+                    format!("，上下文：{resolved} 个按目录更新{confirmed_part}")
+                } else {
+                    String::new()
+                };
                 results.push(ImportResult {
                     name: p.name.clone(),
                     kind: p.kind.clone(),
@@ -526,7 +673,7 @@ pub fn import_providers_from(
                     source: source.clone(),
                     status: "success".into(),
                     provider_key: key,
-                    message: format!("已写入 {} 个模型", p.models.len()),
+                    message: format!("已写入 {} 个模型{ctx_note}", p.models.len()),
                 });
             }
             Err(e) => {

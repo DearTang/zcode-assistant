@@ -41,6 +41,7 @@ pub fn sync_usage(db: &Database, full: bool) -> anyhow::Result<UsageSyncResult> 
         None => {
             return Ok(UsageSyncResult {
                 new_count: 0,
+                removed_count: 0,
                 total_count: total_before,
                 scanned_files: 0,
                 min_date: None,
@@ -56,6 +57,7 @@ pub fn sync_usage(db: &Database, full: bool) -> anyhow::Result<UsageSyncResult> 
             log::warn!("打开 zcode 用量库失败: {e}");
             return Ok(UsageSyncResult {
                 new_count: 0,
+                removed_count: 0,
                 total_count: total_before,
                 scanned_files: 0,
                 min_date: None,
@@ -102,12 +104,44 @@ pub fn sync_usage(db: &Database, full: bool) -> anyhow::Result<UsageSyncResult> 
         }
     }
     drop(stmt);
+
+    // zcode 侧全量 request_id 集合（对账用）：model_usage 是权威数据源，
+    // 但 zcode 会自行清理行（如清除会话用量）；增量导入只增不删，
+    // 不对账的话被清理的行会永久留在本地，造成统计偏高
+    let mut zc_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut id_stmt = conn.prepare("SELECT id FROM model_usage WHERE id IS NOT NULL AND id <> ''")?;
+        let id_rows = id_stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for x in id_rows {
+            zc_ids.insert(x?);
+        }
+    }
     drop(conn);
 
     let scanned = recs.len();
     let new_count = db.insert_usage_ignore(&recs).unwrap_or(0);
     // 游标推进到本轮最大 rowid（即使本轮插入被去重忽略，也推进，避免重复扫描）
     let _ = db.kv_set(CURSOR_KEY, &cursor.to_string());
+
+    // 对账回收：删除 zcode 侧已不存在的本地记录（空 id 不参与，避免误删）
+    let removed_count = match db.list_usage_request_ids() {
+        Ok(local_ids) => {
+            let stale: Vec<String> = local_ids
+                .into_iter()
+                .filter(|id| !id.is_empty() && !zc_ids.contains(id))
+                .collect();
+            if stale.is_empty() {
+                0
+            } else {
+                log::info!("用量对账：回收 {} 条 zcode 侧已删除的记录", stale.len());
+                db.delete_usage_by_request_ids(&stale).unwrap_or(0)
+            }
+        }
+        Err(e) => {
+            log::warn!("用量对账查询本地记录失败: {e}");
+            0
+        }
+    };
 
     let total_count = db.count_usage().unwrap_or(total_before + new_count as i64);
     let (min_date, max_date) = match db.usage_filters() {
@@ -117,6 +151,7 @@ pub fn sync_usage(db: &Database, full: bool) -> anyhow::Result<UsageSyncResult> 
 
     Ok(UsageSyncResult {
         new_count,
+        removed_count,
         total_count,
         scanned_files: scanned,
         min_date,

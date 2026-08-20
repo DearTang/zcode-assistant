@@ -7,7 +7,7 @@ import {
   IconUser,
 } from "../../components/icons";
 import { formatUnits } from "../../api";
-import type { QuotaOverview } from "../../types";
+import type { QuotaOverview, UsageDisplayMode } from "../../types";
 
 function StatCard({
   icon,
@@ -64,12 +64,17 @@ export default function Dashboard({
   loading,
   error,
   onRefresh,
+  usageDisplay = "used",
 }: {
   data: QuotaOverview | null;
   loading: boolean;
   error: string | null;
   onRefresh: () => void;
+  /** 模型用量展示方案（与悬浮球/托盘同源）：已用 / 剩余 */
+  usageDisplay?: UsageDisplayMode;
 }) {
+  // 展示方案：数字与进度条宽度随方案（已用 / 剩余），颜色始终按已用度分级
+  const showRemaining = usageDisplay === "remaining";
   return (
     <>
       <div className="za-grid za-grid-3">
@@ -121,6 +126,7 @@ export default function Dashboard({
           {data &&
             data.buckets.map((b) => {
               const pct = b.total > 0 ? (b.used / b.total) * 100 : 0;
+              const shown = showRemaining ? 100 - pct : pct;
               return (
                 <div key={b.name}>
                   <div
@@ -144,7 +150,7 @@ export default function Dashboard({
                       </span>
                     </span>
                   </div>
-                  <Progress value={pct} />
+                  <Progress value={shown} colorValue={pct} />
                   <div
                     className="za-row-between"
                     style={{
@@ -153,7 +159,7 @@ export default function Dashboard({
                     }}
                   >
                     <span className="za-faint">
-                      已用 {pct.toFixed(1)}%
+                      {showRemaining ? "剩余" : "已用"} {Math.round(shown)}%
                     </span>
                     {b.periodEnd && (
                       <span className="za-faint">

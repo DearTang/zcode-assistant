@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  zcode-assistant — "Aurora Prompt" concept A
+  视觉骨架沿用 myshell source-a.svg（深色 base + 径向靛/青光斑 + 圆角方形 + 发光滤镜 + 顶部 sheen + 1px 白边），
+  主符号由 `>_` 改为 `Z_`，呼应 zcode 字母身份。
+  色板对齐 src/styles/tokens.css：青绿 oklch(0.72 0.15 180) 与靛 oklch(0.55 0.18 280)。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="z-base" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0a12"/>
+      <stop offset="1" stop-color="#07070d"/>
+    </linearGradient>
+    <radialGradient id="z-indigo" cx="22%" cy="16%" r="62%">
+      <stop offset="0" stop-color="#6366f1" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#6366f1" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="z-cyan" cx="84%" cy="88%" r="56%">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.40"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="z-mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#a5b4fc"/>
+      <stop offset="0.5" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <linearGradient id="z-sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.26"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="z-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="16" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <clipPath id="z-clip"><rect width="1024" height="1024" rx="228"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#z-clip)">
+    <rect width="1024" height="1024" fill="url(#z-base)"/>
+    <rect width="1024" height="1024" fill="url(#z-indigo)"/>
+    <rect width="1024" height="1024" fill="url(#z-cyan)"/>
+  </g>
+
+  <rect x="3" y="3" width="1018" height="1018" rx="225" fill="url(#z-sheen)"/>
+  <rect x="2" y="2" width="1020" height="1020" rx="226" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="3"/>
+
+  <g filter="url(#z-glow)">
+    <path d="M302,302 L722,302 L302,722 L722,722"
+          fill="none" stroke="url(#z-mark)" stroke-width="88"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

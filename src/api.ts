@@ -64,6 +64,8 @@ export const prefs = {
   /** 切换后重启 ZCode（开=自动切换直改配置并自动重启；关=自动切换免重启模拟，默认开） */
   setSwitchRestart: (enabled: boolean) =>
     invoke<void>("set_switch_restart_zcode", { enabled }),
+  /** 开机自启动（注册 / 注销系统自启项，重启后生效） */
+  setAutostart: (enabled: boolean) => invoke<void>("set_autostart", { enabled }),
 };
 
 /** 前端日志桥：打到后端 stdout，便于在终端追踪悬浮窗交互链路（失败静默，不影响业务） */
@@ -431,16 +433,84 @@ export interface ProviderPreview {
   /** 命中的已有 provider key（导入时将覆盖更新该条） */
   duplicateOf?: string | null;
 }
+/** 目录匹配的单个模型（真实上下文） */
+export interface ResolvedModel {
+  id: string;
+  context: number;
+  /** 输出上限（仅内置规格表命中时有） */
+  output?: number | null;
+}
+/** 上下文预解析结果：unmatched 需弹窗让用户逐个确认 */
+export interface ResolveContextsResult {
+  matched: ResolvedModel[];
+  unmatched: string[];
+}
 export const importer = {
   /** 预览导入内容：解析来源配置并标记覆盖关系，不执行任何写入 */
   preview: (source: string, path?: string) =>
     invoke<ProviderPreview[]>("preview_providers_from", { source, path }),
-  /** 执行导入；selected=预览弹窗勾选的条目 id（不传=全部，向后兼容） */
-  from: (source: string, path?: string, selected?: string[]) =>
-    invoke<ImportResult[]>("import_providers_from", { source, path, selected }),
+  /** 预解析导入模型的上下文（「重新获取上下文」开启、导入确认前调用），不写入 */
+  resolveContexts: (source: string, path?: string, selected?: string[]) =>
+    invoke<ResolveContextsResult>("resolve_import_contexts", {
+      source,
+      path,
+      selected,
+    }),
+  /**
+   * 执行导入；selected=预览弹窗勾选的条目 id（不传=全部，向后兼容）；
+   * refetchContext=「重新获取上下文」开关（开启时命中的模型覆盖为真实值，
+   * 未命中的用 contextOverrides 携带的用户确认值）
+   */
+  from: (
+    source: string,
+    path?: string,
+    selected?: string[],
+    refetchContext?: boolean,
+    contextOverrides?: Record<string, number>
+  ) =>
+    invoke<ImportResult[]>("import_providers_from", {
+      source,
+      path,
+      selected,
+      refetchContext,
+      contextOverrides,
+    }),
   /** 弹出系统文件选择器，返回选中的文件路径（用户取消返回 null） */
   pickFile: (source: string, defaultPath?: string) =>
     invoke<string | null>("pick_config_file", { source, defaultPath }),
+};
+
+/* ============ 反向同步（zcode → cc-switch，app_type='opencode'）============ */
+export type ExportStatus = "success" | "updated" | "failed";
+/** 预览：待导出的 zcode provider（未写入），供弹窗勾选 */
+export interface ExportPreview {
+  /** zcode provider key（勾选 / 导出过滤的标识） */
+  id: string;
+  name: string;
+  baseUrl: string;
+  modelCount: number;
+  hasApiKey: boolean;
+  enabled: boolean;
+  /** 目标侧命中的已有 key（导出时将覆盖更新该条） */
+  duplicateOf?: string | null;
+}
+export interface ExportResult {
+  name: string;
+  status: ExportStatus;
+  targetKey: string;
+  message: string;
+}
+export interface ExportOutcome {
+  results: ExportResult[];
+  /** 非致命警告（如 cc-switch 正在运行需重启后查看） */
+  warning?: string | null;
+}
+export const exporter = {
+  /** 预览导出内容：解析 zcode provider 并标记 cc-switch 侧覆盖关系，不执行任何写入 */
+  preview: () => invoke<ExportPreview[]>("export_preview"),
+  /** 执行导出到 cc-switch（opencode 供应商组）；selected=预览弹窗勾选的条目 id（不传=全部） */
+  to: (selected?: string[]) =>
+    invoke<ExportOutcome>("export_providers_to", { selected }),
 };
 
 /* ============ 当前模型可用性检测 ============ */
@@ -511,9 +581,10 @@ export function maskApiKey(key?: string): string {
   return `${key.slice(0, 6)}••••${key.slice(-4)}`;
 }
 
-/** 字节数/配额数值的人类可读格式（K → M → B 逐级进位） */
+/** 字节数/配额数值的人类可读格式（K → M → B 逐级进位）；百分比取整显示 */
 export function formatUnits(n: number, unit?: string): string {
   if (!Number.isFinite(n)) return "—";
+  if (unit === "%") return `${Math.round(n)}%`;
   if (Math.abs(n) >= 1_000_000_000)
     return `${(n / 1_000_000_000).toFixed(2)}B ${unit ?? ""}`.trim();
   if (Math.abs(n) >= 1_000_000)

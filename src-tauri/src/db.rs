@@ -479,6 +479,33 @@ impl Database {
         Ok(())
     }
 
+    /// 全部用量记录的 request_id（同步对账用）
+    pub fn list_usage_request_ids(&self) -> Result<Vec<String>> {
+        let c = self.lock()?;
+        let mut stmt = c.prepare("SELECT request_id FROM usage_records")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        let mut v = Vec::new();
+        for row in rows {
+            v.push(row?);
+        }
+        Ok(v)
+    }
+
+    /// 按 request_id 批量删除本地用量记录（zcode 侧已清理的行，同步时对账回收）
+    pub fn delete_usage_by_request_ids(&self, ids: &[String]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let c = self.lock()?;
+        let mut n = 0;
+        for chunk in ids.chunks(400) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!("DELETE FROM usage_records WHERE request_id IN ({placeholders})");
+            n += c.execute(&sql, rusqlite::params_from_iter(chunk))? as usize;
+        }
+        Ok(n)
+    }
+
     /// 按会话 id 删除本地用量记录（会话在 zcode 库被删除后调用，保持用量页口径一致）
     pub fn delete_usage_by_sessions(&self, session_ids: &[String]) -> Result<usize> {
         if session_ids.is_empty() {

@@ -25,6 +25,7 @@ export default function FloatPanel() {
     floatBallVisible: true,
     usageDisplay: "used",
     switchRestartZcode: true,
+    autostart: false,
   });
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
