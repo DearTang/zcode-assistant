@@ -342,10 +342,9 @@ pub async fn download(app: &tauri::AppHandle, window: &WebviewWindow, url: &str)
 
 /// 启动下载好的安装器并退出本进程，让安装器替换正在运行的文件。
 ///
-/// zcode-assistant 默认 perUser 安装，`std::process::Command::spawn` 即可（继承
-/// 调用方 token，无需提权）。**注意**：若将来改为 perMachine NSIS 安装，需要 UAC
-/// 提权——届时需引入 `windows`/`winapi` crate 用 `ShellExecuteW("runas")`，正如
-/// myshell 的做法（其 NSIS 为 perMachine）。
+/// 安装包为 perMachine NSIS（装到 Program Files），要求管理员权限，普通
+/// spawn 会报 os error 740（ERROR_ELEVATION_REQUIRED）。Windows 用
+/// ShellExecuteW 携带 "runas" verb 提权启动（触发 UAC 确认），其余平台普通启动。
 pub fn install(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
     if path.bytes().any(|b| b == 0) {
         return Err("无效路径".to_string());
@@ -360,11 +359,39 @@ pub fn install(app: &tauri::AppHandle, path: &str) -> Result<(), String> {
         if !path.to_ascii_lowercase().ends_with(".exe") {
             return Err("仅支持 .exe 安装包".to_string());
         }
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::UI::Shell::ShellExecuteW;
+        use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let to_wide = |s: &str| -> Vec<u16> {
+            std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
+        };
+        let verb = to_wide("runas");
+        let file = to_wide(path);
+        // 返回值 > 32 才算成功；用户在 UAC 确认框点「否」也会落到失败分支
+        let code = unsafe {
+            ShellExecuteW(
+                None,
+                PCWSTR(verb.as_ptr()),
+                PCWSTR(file.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if code.0 as isize <= 32 {
+            return Err(format!(
+                "启动安装器失败（ShellExecute {}；若在 UAC 确认框点了「否」，重试即可）",
+                code.0 as isize
+            ));
+        }
     }
-
-    std::process::Command::new(path)
-        .spawn()
-        .map_err(|e| format!("启动安装器失败: {e}"))?;
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::process::Command::new(path)
+            .spawn()
+            .map_err(|e| format!("启动安装器失败: {e}"))?;
+    }
 
     // 退出以便安装器覆盖当前二进制。exit(0) 会跑 RunEvent::Exit 清理后终止。
     app.exit(0);

@@ -38,7 +38,7 @@ pub fn quit_app(app: AppHandle) {
     app.exit(0);
 }
 
-/// 覆盖启动：结束当前进程并重新拉起（单实例弹窗「覆盖启动」按钮调用）。
+/// 覆盖启动：结束当前进程并重新启动（单实例弹窗「覆盖启动」按钮调用）。
 /// dev 模式（tauri dev）下应用进程退出会连带结束整个 dev 会话——tauri CLI
 /// 随之关闭并杀掉 Vite，重新拉起的进程成为孤儿、页面再也刷不出 localhost。
 /// 因此 debug 构建改为仅重载主窗口页面（后端代码本就会由 watcher 热重编译重启）。
@@ -51,6 +51,31 @@ pub fn restart_app(app: AppHandle) {
         }
         return;
     }
+    // 生产：app.restart() 与单实例插件存在竞态——新进程可能先于旧进程退出
+    // 释放单实例锁启动，把自己判定为第二实例后随即退出（表现为重启失败）。
+    // 改由 cmd 延迟 1 秒再启动新实例：旧进程先退出释放锁，新实例正常启动；
+    // cmd 由旧进程派生，新实例继承相同的完整性级别（装完安装器自动启动的
+    // 提升态场景也保持一致）。
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        if let Ok(exe) = std::env::current_exe() {
+            let exe_str = exe.to_string_lossy();
+            let mut c = std::process::Command::new("cmd");
+            crate::zcode::process::no_window(&mut c);
+            let ok = c
+                .raw_arg(format!(
+                    "/C timeout /t 1 /nobreak >nul & start \"\" \"{exe_str}\""
+                ))
+                .spawn()
+                .is_ok();
+            if ok {
+                app.exit(0);
+                return;
+            }
+        }
+    }
+    // 兜底：cmd 代理不可用时退回 tauri 自带重启
     app.restart();
 }
 
