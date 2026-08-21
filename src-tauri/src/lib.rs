@@ -148,6 +148,7 @@ pub fn run() {
             commands::models_cmd::get_provider_api_key,
             commands::models_cmd::set_provider_primary,
             commands::models_cmd::get_primary_provider,
+            commands::models_cmd::bootstrap_primary,
             commands::models_cmd::test_provider_connection,
             // 导入配置
             commands::import_cmd::preview_providers_from,
@@ -170,6 +171,7 @@ pub fn run() {
             commands::token_cmd::quota_token_status,
             commands::token_cmd::get_quota_token_value,
             commands::token_cmd::clear_quota_token,
+            commands::token_cmd::set_quota_token,
             commands::token_cmd::set_quota_login_password,
             // 账号
             commands::accounts_cmd::list_accounts,

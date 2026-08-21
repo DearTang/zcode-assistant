@@ -76,7 +76,7 @@ export interface QuotaBucket {
 
 /** 聚合配额概览 */
 export interface QuotaOverview {
-  source: "coding-plan" | "template" | "unknown";
+  source: "coding-plan" | "template" | "unknown" | "none";
   /** 配额所属供应商显示名（总览 / 悬浮窗 / 托盘标注数据来源） */
   providerName?: string;
   accountLabel?: string;
@@ -263,9 +263,17 @@ export interface QuotaTemplate {
   monthlyTotalPath?: string;
   monthlyUsedPath?: string;
   monthlyRemainingPath?: string;
+  /** 每5小时窗口（可选）：配置后同一响应里再提取「每5小时使用额度」桶 */
+  fiveHourTotalPath?: string;
+  fiveHourUsedPath?: string;
+  fiveHourRemainingPath?: string;
+  /** 每周窗口（可选）：配置后同一响应里再提取「每周使用额度」桶 */
+  weeklyTotalPath?: string;
+  weeklyUsedPath?: string;
+  weeklyRemainingPath?: string;
   /** 登录页 URL：供「登录获取 Token」弹内嵌窗口加载 */
   loginUrl?: string;
-  /** Token 提取方式：cookie:<名称> | localstorage:<key>[#<dot.path>] */
+  /** Token 提取方式：cookie:<名称> | cookie:（留空取完整 cookie 串）| localstorage:<key>[#<dot.path>] */
   tokenSource?: string;
   /** 用量查询方式：token=登录会话 Token | appkey=API Key（默认/旧数据）| coding_plan=Token Plan 内置预设 */
   authMode?: "token" | "appkey" | "coding_plan" | string;
@@ -273,6 +281,16 @@ export interface QuotaTemplate {
   loginUsername?: string;
   /** 附加凭据 JSON：智谱团队版 {organizationId,projectId}；火山方舟 {accessKeyId,secretAccessKey} */
   extraJson?: string;
+  /** 配额单位："%" → 百分比（值 ≤ 1.0 自动 ×100）；缺省 = 绝对值 */
+  unit?: string;
+  /** 重置时间 dot path（毫秒/秒时间戳或 ISO 字符串）→ 提取到 bucket.periodEnd */
+  resetTimePath?: string;
+  /** 每5小时窗口重置时间 dot path */
+  fiveHourResetTimePath?: string;
+  /** 每周窗口重置时间 dot path */
+  weeklyResetTimePath?: string;
+  /** 月限额重置时间 dot path */
+  monthlyResetTimePath?: string;
 }
 
 /** 配额 Token 状态（keyring 是否已存 + 获取时间 + 登录密码是否已保存） */

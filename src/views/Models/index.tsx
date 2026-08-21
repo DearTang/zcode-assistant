@@ -1311,11 +1311,22 @@ function ProviderQuotaRow({
   const bM = quota.buckets.find(
     (b) => b.name.includes("每月") && !b.name.includes("MCP")
   );
+  // 余额桶（可选）：不属于 5小时/每周/每月 的第一个桶（模板主桶，如「DeepSeek 余额」）
+  const bB = quota.buckets.find(
+    (b) =>
+      !b.name.includes("5小时") &&
+      !b.name.includes("每周") &&
+      !b.name.includes("每月")
+  );
   const monthlyPart = bM
     ? ` · 每月 ${showRemaining ? "剩" : "已用"}${fmtBucket(bM)}`
     : "";
-  const monthlyOk = !bM || bM.remaining > 0;
-  // 智谱 BigModel：每5小时 + 每周（部分供应商再追加每月）
+  const balancePart = bB
+    ? ` · ${bB.name} ${showRemaining ? "剩" : "已用"}${fmtBucket(bB)}`
+    : "";
+  const monthlyOk = !bM || !bucketExhausted(bM);
+  const balanceOk = !bB || !bucketExhausted(bB);
+  // 智谱 BigModel / Token Plan：每5小时 + 每周（部分供应商再追加每月、余额）
   if (b5 || bW) {
     const u5 = b5 && b5.total > 0 ? (b5.used / b5.total) * 100 : null;
     const uW = bW && bW.total > 0 ? (bW.used / bW.total) * 100 : null;
@@ -1331,10 +1342,17 @@ function ProviderQuotaRow({
     // 可用性只判定实际存在的 bucket：部分供应商没有周限额（只有 5 小时窗口），
     // 缺失的 bucket 不参与判定，否则会被误标「不可用」
     const ok =
-      (b5 ? b5.remaining > 0 : true) &&
-      (bW ? bW.remaining > 0 : true) &&
-      monthlyOk;
-    const reset = b5?.periodEnd || bW?.periodEnd;
+      (b5 ? !bucketExhausted(b5) : true) &&
+      (bW ? !bucketExhausted(bW) : true) &&
+      monthlyOk &&
+      balanceOk;
+    // 重置时间优先级：已耗尽的桶优先（月→周→5小时），均未耗尽时回退 5 小时
+    const reset =
+      (bM && bucketExhausted(bM) ? bM.periodEnd : undefined) ||
+      (bW && bucketExhausted(bW) ? bW.periodEnd : undefined) ||
+      (b5 && bucketExhausted(b5) ? b5.periodEnd : undefined) ||
+      b5?.periodEnd ||
+      bW?.periodEnd;
     return (
       <div
         className="za-row"
@@ -1349,6 +1367,7 @@ function ProviderQuotaRow({
         <span className="za-mono" style={{ fontSize: "var(--fs-xs)" }}>
           {summary}
           {monthlyPart}
+          {balancePart}
         </span>
         <AvailabilityBadge ok={ok} />
         {reset && (
@@ -1368,7 +1387,10 @@ function ProviderQuotaRow({
     const usedPct = b.total > 0 ? (b.used / b.total) * 100 : null;
     const summary =
       `${showRemaining ? "剩" : "已用"} ${fmtBucket(b)}` + monthlyPart;
-    const ok = b.remaining > 0 && monthlyOk;
+    const ok = !bucketExhausted(b) && monthlyOk;
+    // 重置时间：月限额耗尽时优先展示月重置，否则用主桶
+    const tmplReset =
+      (bM && bucketExhausted(bM) ? bM.periodEnd : undefined) || b.periodEnd;
     return (
       <div
         className="za-row"
@@ -1388,8 +1410,8 @@ function ProviderQuotaRow({
           className="za-faint za-mono"
           style={{ fontSize: "var(--fs-xs)" }}
         >
-          {b.periodEnd
-            ? `重置 ${formatReset(b.periodEnd)}`
+          {tmplReset
+            ? `重置 ${formatReset(tmplReset)}`
             : `更新 ${formatTime(quota.fetchedAt)}`}
         </span>
       </div>
@@ -1436,6 +1458,12 @@ function AvailabilityBadge({ ok }: { ok: boolean }) {
       {ok ? "可用" : "不可用"}
     </span>
   );
+}
+
+/** bucket 是否已耗尽：% 桶按取整判定（与 fmtBucket 显示口径一致，避免 0.4% 显示为 0% 却仍判可用） */
+function bucketExhausted(b: QuotaBucket): boolean {
+  if (b.unit === "%") return Math.round(b.remaining) <= 0;
+  return b.remaining <= 0;
 }
 
 function formatReset(iso: string) {
@@ -1500,6 +1528,9 @@ function ProviderEditModal({
   // 明文 token（点「显示」后从后端加载核对；fetchedAt 变化 = 新 token，自动收回明文）
   const [revealedToken, setRevealedToken] = useState<string | null>(null);
   const [tokenCopied, setTokenCopied] = useState(false);
+  // 「手动输入 Token」折叠面板（无需登录弹窗，从浏览器 DevTools 等复制后直接粘贴）
+  const [showManualToken, setShowManualToken] = useState(false);
+  const [manualTokenDraft, setManualTokenDraft] = useState("");
   const isTokenMode = (tTmpl.authMode ?? "appkey") === "token";
   // Token Plan 供应商（按 baseURL 自动识别并查询；智谱团队/火山需附加凭据 → 模板 extraJson）
   const codingPlan = detectCodingPlan(provider.options.baseURL ?? "");
@@ -1744,10 +1775,21 @@ function ProviderEditModal({
       monthlyTotalPath: t.monthlyTotalPath,
       monthlyUsedPath: t.monthlyUsedPath,
       monthlyRemainingPath: t.monthlyRemainingPath,
+      fiveHourTotalPath: t.fiveHourTotalPath,
+      fiveHourUsedPath: t.fiveHourUsedPath,
+      fiveHourRemainingPath: t.fiveHourRemainingPath,
+      weeklyTotalPath: t.weeklyTotalPath,
+      weeklyUsedPath: t.weeklyUsedPath,
+      weeklyRemainingPath: t.weeklyRemainingPath,
       loginUrl: t.loginUrl,
       tokenSource: t.tokenSource,
       authMode: t.authMode,
       loginUsername: t.loginUsername,
+      unit: t.unit,
+      resetTimePath: t.resetTimePath,
+      fiveHourResetTimePath: t.fiveHourResetTimePath,
+      weeklyResetTimePath: t.weeklyResetTimePath,
+      monthlyResetTimePath: t.monthlyResetTimePath,
       // 附加凭据（团队组织/项目 ID、火山 AK/SK）不属于「模板内容」：
       // 所选模板没带就保留用户已填的，避免一键套用预设时静默清空密钥
       extraJson: t.extraJson ?? tTmpl.extraJson,
@@ -1788,6 +1830,21 @@ function ProviderEditModal({
       await quotaToken.clear(providerKey);
       setTToken((t) => (t ? { ...t, hasToken: false, fetchedAt: undefined } : null));
       toast.success("Token 已清除");
+    });
+
+  /** 手动粘贴 Token 保存：写 keyring（与登录获取走同一通道）；draft 清空 + 收起面板，
+   *  状态更新由 onTokenUpdated 事件 → quotaToken.status 拉取，UI 自动刷新 */
+  const handleSaveManualToken = () =>
+    onRun(async () => {
+      const v = manualTokenDraft.trim();
+      if (v.length < 8) {
+        toast.error("Token 太短（至少 8 字符），请核对后重新粘贴");
+        return;
+      }
+      await quotaToken.set(providerKey, v);
+      setManualTokenDraft("");
+      setShowManualToken(false);
+      toast.success("Token 已手动写入系统凭证库");
     });
 
   return (
@@ -2632,6 +2689,135 @@ function ProviderEditModal({
                     placeholder="data.remaining"
                   />
                 </label>
+                <label style={fieldStyle}>
+                  配额单位
+                  <select
+                    className="za-select"
+                    value={tTmpl.unit ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, unit: e.target.value || undefined })
+                    }
+                  >
+                    <option value="">绝对值（默认）</option>
+                    <option value="%">百分比 %（0-1 自动 ×100）</option>
+                  </select>
+                </label>
+                <label style={fieldStyle}>
+                  重置时间 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.resetTimePath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, resetTimePath: e.target.value })
+                    }
+                    placeholder="data.resetTime"
+                  />
+                </label>
+              </div>
+              <p
+                className="za-faint"
+                style={{ margin: "10px 0 6px", fontSize: "var(--fs-xs)" }}
+              >
+                每5小时窗口（可选，Token Plan 供应商）：从同一响应里再提取一组
+                「每5小时使用额度」，与每周桶组成双环展示；未配置或提取不到则不展示。
+              </p>
+              <div className="za-grid za-grid-2" style={{ gap: 8 }}>
+                <label style={fieldStyle}>
+                  5小时总额 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.fiveHourTotalPath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, fiveHourTotalPath: e.target.value })
+                    }
+                    placeholder="data.interval_total"
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  5小时已用 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.fiveHourUsedPath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, fiveHourUsedPath: e.target.value })
+                    }
+                    placeholder="data.interval_used"
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  5小时剩余 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.fiveHourRemainingPath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, fiveHourRemainingPath: e.target.value })
+                    }
+                    placeholder="data.interval_remaining"
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  5小时重置时间 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.fiveHourResetTimePath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, fiveHourResetTimePath: e.target.value })
+                    }
+                    placeholder="data.interval_reset"
+                  />
+                </label>
+              </div>
+              <p
+                className="za-faint"
+                style={{ margin: "10px 0 6px", fontSize: "var(--fs-xs)" }}
+              >
+                每周窗口（可选）：从同一响应里再提取一组「每周使用额度」；未配置或提取不到则不展示。
+              </p>
+              <div className="za-grid za-grid-2" style={{ gap: 8 }}>
+                <label style={fieldStyle}>
+                  每周总额 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.weeklyTotalPath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, weeklyTotalPath: e.target.value })
+                    }
+                    placeholder="data.weekly_total"
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  每周已用 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.weeklyUsedPath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, weeklyUsedPath: e.target.value })
+                    }
+                    placeholder="data.weekly_used"
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  每周剩余 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.weeklyRemainingPath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, weeklyRemainingPath: e.target.value })
+                    }
+                    placeholder="data.weekly_remaining"
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  每周重置时间 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.weeklyResetTimePath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, weeklyResetTimePath: e.target.value })
+                    }
+                    placeholder="data.weekly_reset"
+                  />
+                </label>
               </div>
               <p
                 className="za-faint"
@@ -2663,7 +2849,7 @@ function ProviderEditModal({
                     placeholder="data.monthly_used"
                   />
                 </label>
-                <label style={{ ...fieldStyle, gridColumn: "1 / -1" }}>
+                <label style={fieldStyle}>
                   每月剩余 path
                   <input
                     className="za-input za-mono"
@@ -2672,6 +2858,17 @@ function ProviderEditModal({
                       setTTmpl({ ...tTmpl, monthlyRemainingPath: e.target.value })
                     }
                     placeholder="data.monthly_remaining"
+                  />
+                </label>
+                <label style={fieldStyle}>
+                  每月重置时间 path
+                  <input
+                    className="za-input za-mono"
+                    value={tTmpl.monthlyResetTimePath ?? ""}
+                    onChange={(e) =>
+                      setTTmpl({ ...tTmpl, monthlyResetTimePath: e.target.value })
+                    }
+                    placeholder="data.monthly_reset"
                   />
                 </label>
               </div>
@@ -2782,7 +2979,7 @@ function ProviderEditModal({
                         onChange={(e) =>
                           setTTmpl({ ...tTmpl, tokenSource: e.target.value })
                         }
-                        placeholder="cookie:session_id 或 localstorage:user#token"
+                        placeholder="cookie:session_id 或 cookie:（留空取全部）或 localstorage:user#token"
                       />
                     </label>
                   </div>
@@ -2802,20 +2999,84 @@ function ProviderEditModal({
                     <button
                       type="button"
                       className="za-btn za-btn-sm"
+                      onClick={() => setShowManualToken((s) => !s)}
+                      title="跳过登录弹窗，直接粘贴 Token（从浏览器 DevTools / 其他工具复制）"
+                    >
+                      {showManualToken ? "收起" : "手动输入 Token"}
+                    </button>
+                    <button
+                      type="button"
+                      className="za-btn za-btn-sm"
                       onClick={handleLoginToken}
                     >
                       登录获取 Token
                     </button>
                   </div>
+                  {showManualToken && (
+                    <div
+                      style={{
+                        marginTop: 8,
+                        padding: 8,
+                        borderRadius: 6,
+                        border: "1px dashed var(--glass-border)",
+                        background: "var(--glass-bg)",
+                      }}
+                    >
+                      <p
+                        className="za-faint"
+                        style={{ margin: "0 0 6px", fontSize: "var(--fs-xs)" }}
+                      >
+                        直接粘贴 Token（无需走登录窗）：登录平台后从浏览器 DevTools
+                        的 Application → Cookies / LocalStorage 取出，或从其他工具
+                        复制。保存后写入系统凭证库，模板里用 <span className="za-mono">{"{{token}}"}</span> 引用。
+                      </p>
+                      <textarea
+                        className="za-textarea za-mono"
+                        style={{ minHeight: 60, fontSize: "var(--fs-xs)" }}
+                        value={manualTokenDraft}
+                        onChange={(e) => setManualTokenDraft(e.target.value)}
+                        placeholder="粘贴完整 Token / Cookie 串（≥8 字符）"
+                        autoFocus
+                      />
+                      <div
+                        className="za-row"
+                        style={{
+                          gap: 6,
+                          marginTop: 6,
+                          justifyContent: "flex-end",
+                        }}
+                      >
+                        <button
+                          type="button"
+                          className="za-btn za-btn-sm"
+                          onClick={() => {
+                            setManualTokenDraft("");
+                            setShowManualToken(false);
+                          }}
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          className="za-btn za-btn-sm za-btn-primary"
+                          onClick={handleSaveManualToken}
+                        >
+                          保存 Token
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <p
                     className="za-faint"
                     style={{ margin: "8px 0 0", fontSize: "var(--fs-xs)" }}
                   >
-                    点「登录获取 Token」弹出该平台登录页，在登录窗中完成登录
-                    （含验证码 / 两步验证）即可；成功后自动提取 Token 存入系统凭证库，
-                    模板中用 <span className="za-mono">{"{{token}}"}</span> 引用。提取方式：{" "}
+                    两种获取方式：「登录获取 Token」弹出该平台登录页，在登录窗中完成登录
+                    （含验证码 / 两步验证）即可；「手动输入 Token」跳过登录窗，直接粘贴从浏览器
+                    DevTools / 其他工具复制的 Token。两者都存系统凭证库，模板中用{" "}
+                    <span className="za-mono">{"{{token}}"}</span> 引用。提取方式：{" "}
                     <span className="za-mono">cookie:名称</span>（Windows 下支持 HttpOnly
-                    cookie）或{" "}
+                    cookie；留空或写 <span className="za-mono">*</span> 取完整 cookie 串，
+                    适合 Cookie 头认证的供应商，无需猜哪个是票据）或{" "}
                     <span className="za-mono">localstorage:key</span>
                     （值为 JSON 加 <span className="za-mono">#字段.路径</span>）。
                   </p>

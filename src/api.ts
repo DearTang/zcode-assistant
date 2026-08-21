@@ -190,6 +190,12 @@ export const models = {
     invoke<void>("set_provider_primary", { providerKey, enabled }),
   /** 取主供应商 key（未设置为 null，展示回退自动识别的智谱 Coding Plan） */
   getPrimary: () => invoke<string | null>("get_primary_provider"),
+  /**
+   * 启动引导：best-effort 选一个主供应商（已设过且仍存在 → 不动；否则优先智谱
+   * Coding Plan 内置；再否则第一个 enabled 且带模型的自定义供应商；都没有返回 null），
+   * 并同步写入 setting.json 的 family 选中（bigmodel），保证总览/悬浮窗有数据源。
+   */
+  bootstrapPrimary: () => invoke<string | null>("bootstrap_primary"),
   /** 测试 baseURL + apiKey 能否连通（调 /models，不落盘）。用于「添加供应商」弹窗的测试按钮 */
   testConnection: (baseURL: string, apiKey: string, kind: string) =>
     invoke<{ ok: boolean; message: string; modelCount?: number }>(
@@ -276,6 +282,9 @@ export const quotaToken = {
   /** 读取明文 token（UI「显示」核对用，未获取返回 null） */
   value: (providerKey: string) =>
     invoke<string | null>("get_quota_token_value", { providerKey }),
+  /** 手动写入 token：从浏览器 DevTools 等复制后粘贴到 UI 保存 */
+  set: (providerKey: string, token: string) =>
+    invoke<void>("set_quota_token", { providerKey, token }),
   /** 清除已存的 token */
   clear: (providerKey: string) =>
     invoke<void>("clear_quota_token", { providerKey }),

@@ -18,7 +18,7 @@ import { AboutDialog } from "./components/AboutDialog";
 import { StatsConsentDialog } from "./components/StatsConsentDialog";
 import { ToastContainer, toast } from "./components/Toast";
 import { useUpdateCheck } from "./hooks/useUpdateCheck";
-import { events, win, app, updater, quota, health, prefs as prefsApi, pickRingBuckets, usageColor } from "./api";
+import { events, win, app, updater, quota, health, prefs as prefsApi, pickRingBuckets, usageColor, models } from "./api";
 import {
   checkReportNeeded,
   markVersionHandled,
@@ -131,6 +131,9 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    // 启动引导主供应商：best-effort 自动选（智谱账号 → 第一个用户供应商），
+    // 让总览/悬浮窗一启动就有数据源。无任何可选源时返回 null，后续空概览无报错。
+    models.bootstrapPrimary().catch(() => {});
     refreshQuota();
     // 每 5 秒自动静默刷新（唯一查询源，结果广播给所有消费方）
     const t = setInterval(() => refreshQuota(true), 5000);

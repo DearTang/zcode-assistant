@@ -1,6 +1,6 @@
 [package]
 name = "zcode-assistant"
-version = "0.4.1"
+version = "0.5.0"
 description = "zcode 使用增强工具"
 authors = ["zcode-assistant"]
 edition = "2021"

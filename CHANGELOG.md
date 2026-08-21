@@ -7,18 +7,79 @@
   版本号遵循语义化版本（https://semver.org/lang/zh-CN/）。
   发版流程见 AGENTS.md「Slash rule: 打包」；baseline 记录上一次发布的版本，
   用于步骤 3 的 `git diff --stat <baseline>..HEAD` 完整度核对。
-  baseline: v0.4.1
+  baseline: v0.5.0
 -->
 
 # 更新日志
 
 ## [未发布]
 
+## v0.5.0 - 2026-08-21
+
 ### ✨ 新增
+
+- 「登录 Token」方式新增「手动输入 Token」：跳过内嵌登录窗，直接粘贴从浏览器
+  DevTools / 其他工具复制的 Token（≥8 字符），与自动捕获走同一 keyring 存储
+  通道，模板 `{{token}}` 引用不变——不一定非要从登录窗获取。
+- 用量查询模板内置预设对齐 cc-switch 最新实现：新增 智谱国际版（api.z.ai）与
+  MiniMax 国际版（api.minimax.io）两组 Token Plan 预设（后端本就按 baseURL 自动
+  识别查询，预设供「使用模板」下拉一键参考）。
+- 用量查询模板升级为 cc-switch 四桶口径：主桶（余额/通用）之外新增「每5小时 /
+  每周」窗口路径组与各组重置时间路径，同一响应可提取 每周+每月+余额 等多桶，
+  配了 5小时/每周 的模板走双环展示；新增「配额单位 %」选项（提取值 ≤ 1.0 自动
+  ×100，total 兜底 100），百分比类 API（如 Qwen Token Plan）可直接接入。
+- Token 提取方式支持 `cookie:`（留空）或 `cookie:*`：提取完整 cookie 串（Windows
+  含 HttpOnly），适合 Cookie 头认证的供应商，无需逐个猜测哪个 cookie 是认证票据。
+- 内置「Qwen 通义千问 Token Plan」预设模板：Cookie 登录 + 周配额百分比 +
+  重置时间一键配置，选中预设后点「登录获取 Token」即可。
+- 启动引导主供应商：应用启动时 best-effort 自动选主（已设过且仍存在 → 不动；
+  智谱 Coding Plan 内置订阅（账号登录态）→ 选中；否则第一个 enabled 且带模型的
+  自定义供应商 → 选中；都没有 → 返回 null 不报错），并同步 setting.json 的
+  family 选中（bigmodel）保证总览 / 悬浮窗有数据源。配合上一条「无主供应商且
+  无智谱账号 → 不查询不报错」的修复，全新环境（未登录 / 无供应商）启动不再
+  出现「配额查询失败」toast，总览展示引导文案。
 
 ### 🛠️ 变更
 
+- OpenRouter 模型目录新增输出长度字段（`max_completion_tokens`，接口未提供时默认
+  131072），与上下文长度同源同接口。`matched_spec` / `fetch_available_models` /
+  导入未命中兜底均使用该值；导出到 cc-switch / opencode 时 limit.output 不再要求
+  「必须为正」才导出——缺失时按 131072 兜底，解除此前 opencode 「Missing key
+  limit.output」的校验失败。
+
 ### 🐛 修复
+
+- 修复供应商卡片可用性误判：百分比桶剩余量为极小正数（如 0.4%）时显示「剩0%」
+  却仍判「可用」——改用与显示一致的取整口径（%桶 Math.round ≤ 0 即耗尽）判定，
+  月/周/5小时/余额桶全部参与。
+- 修复供应商卡片重置时间始终优先 5 小时桶的问题：改为按「月→周→5小时」优先
+  展示已耗尽桶的重置时间（未耗尽回退 5 小时），月配额耗尽时不再误导。
+- 修复总览配额查询在「未设主供应商且未登录智谱 Coding Plan」时报错刷屏的问题：
+  fetch_overview_quota 入口短路，双空时直接返回空 QuotaOverview（source="none"，
+  error=None），不发网络请求、不触发错误 toast；总览空状态展示引导文案
+  （设置主供应商或登录智谱账号后可查看用量）。
+- 修复美化主题「颜色替换不彻底」：左侧栏与底部输入栏仍为默认浅色。preset_vars 现
+  在补全 `--color-panel` / `--color-sidebar` / `--color-header` / `--color-input` 四
+  个 token（默认引用 `var(--color-neutral-100/200)`，不覆盖会留下浅色侧栏/输入栏），
+  六个预设主题一并加上。
+- 修复毛玻璃与背景图只在启动屏可见、菜单/对话界面挂载后被盖住的问题。真机
+  app.asar 实测根因有三：(1) 卡片/弹层/输入等表面 token（--color-card / popover /
+  input / secondary）未做半透明覆盖，聊天气泡与弹窗仍为实心底色；(2) 主样式表把
+  71+ 个工具类编译为字面量色值（如 `.bg-background/95 → #fafafae6`、
+  `.dark:bg-[#484A58]`），CSS 变量覆写与类名枚举都够不着；(3) 调色板覆写的混色
+  源 --color-surface 本身近透明（oklab … / 0.03），surface_opacity 形同虚设。
+  修复：表面 token 补全四项；混色源改用主题/自定义背景色；新增注入
+  zcode-custom.js 运行时补丁——由 CSS 变量 --zq-alpha / --zq-blur 作开关，React
+  挂载后用 MutationObserver 把计算样式为不透明的背景持续改写为目标透明度，并给
+  最大的 ≤6 个大面块加 backdrop-filter 真实磨砂（排除 #loading / 代码块 / 媒体
+  元素）；未开启透明特性时 JS 自动空转。对已注入过 CSS 的旧 asar 原地升级补
+  script 标签，重新「应用美化」即可生效。
+- 修复同步到 cc-switch 后 opencode 报「Configuration is invalid」：zcode 的模型
+  字段与 opencode schema 不兼容——reasoning 是对象（enabled/variants/
+  defaultVariant）而 opencode 期望 boolean；limit 缺 output 会被判 Missing key。
+  导出改为按 opencode schema 白名单（name + 完整的 limit{context,output} +
+  modalities），不兼容字段全部丢弃。重新同步并在 cc-switch 里重新应用后即恢复
+  （已损坏的 opencode.json 需删除对应 provider 条目或重新应用覆盖）。
 
 ## [0.4.1] - 2026-08-20
 

@@ -22,7 +22,10 @@ CREATE TABLE IF NOT EXISTS quota_templates (
   total_path TEXT, used_path TEXT, remaining_path TEXT,
   monthly_total_path TEXT, monthly_used_path TEXT, monthly_remaining_path TEXT,
   login_url TEXT, token_source TEXT, auth_mode TEXT, login_username TEXT,
-  extra_json TEXT
+  extra_json TEXT,
+  unit TEXT, reset_time_path TEXT, monthly_reset_time_path TEXT,
+  five_hour_total_path TEXT, five_hour_used_path TEXT, five_hour_remaining_path TEXT, five_hour_reset_time_path TEXT,
+  weekly_total_path TEXT, weekly_used_path TEXT, weekly_remaining_path TEXT, weekly_reset_time_path TEXT
 );
 CREATE TABLE IF NOT EXISTS accounts (
   id TEXT PRIMARY KEY,
@@ -109,6 +112,17 @@ impl Database {
             "monthly_total_path",
             "monthly_used_path",
             "monthly_remaining_path",
+            "unit",
+            "reset_time_path",
+            "monthly_reset_time_path",
+            "five_hour_total_path",
+            "five_hour_used_path",
+            "five_hour_remaining_path",
+            "five_hour_reset_time_path",
+            "weekly_total_path",
+            "weekly_used_path",
+            "weekly_remaining_path",
+            "weekly_reset_time_path",
         ] {
             let sql = format!("ALTER TABLE quota_templates ADD COLUMN {col} TEXT");
             if let Err(e) = conn.execute_batch(&sql) {
@@ -238,8 +252,8 @@ impl Database {
     pub fn upsert_template(&self, t: &QuotaTemplate) -> Result<()> {
         let c = self.lock()?;
         c.execute(
-            "INSERT INTO quota_templates(provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+            "INSERT INTO quota_templates(provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json,unit,reset_time_path,monthly_reset_time_path,five_hour_total_path,five_hour_used_path,five_hour_remaining_path,five_hour_reset_time_path,weekly_total_path,weekly_used_path,weekly_remaining_path,weekly_reset_time_path)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
              ON CONFLICT(provider_key) DO UPDATE SET name=excluded.name,method=excluded.method,url=excluded.url,
              headers_json=excluded.headers_json,body=excluded.body,total_path=excluded.total_path,
              used_path=excluded.used_path,remaining_path=excluded.remaining_path,
@@ -247,8 +261,14 @@ impl Database {
              monthly_remaining_path=excluded.monthly_remaining_path,
              login_url=excluded.login_url,token_source=excluded.token_source,
              auth_mode=excluded.auth_mode,login_username=excluded.login_username,
-             extra_json=excluded.extra_json",
-            params![t.provider_key, t.name, t.method, t.url, t.headers_json, t.body, t.total_path, t.used_path, t.remaining_path, t.monthly_total_path, t.monthly_used_path, t.monthly_remaining_path, t.login_url, t.token_source, t.auth_mode, t.login_username, t.extra_json],
+             extra_json=excluded.extra_json,
+             unit=excluded.unit,reset_time_path=excluded.reset_time_path,
+             monthly_reset_time_path=excluded.monthly_reset_time_path,
+             five_hour_total_path=excluded.five_hour_total_path,five_hour_used_path=excluded.five_hour_used_path,
+             five_hour_remaining_path=excluded.five_hour_remaining_path,five_hour_reset_time_path=excluded.five_hour_reset_time_path,
+             weekly_total_path=excluded.weekly_total_path,weekly_used_path=excluded.weekly_used_path,
+             weekly_remaining_path=excluded.weekly_remaining_path,weekly_reset_time_path=excluded.weekly_reset_time_path",
+            params![t.provider_key, t.name, t.method, t.url, t.headers_json, t.body, t.total_path, t.used_path, t.remaining_path, t.monthly_total_path, t.monthly_used_path, t.monthly_remaining_path, t.login_url, t.token_source, t.auth_mode, t.login_username, t.extra_json, t.unit, t.reset_time_path, t.monthly_reset_time_path, t.five_hour_total_path, t.five_hour_used_path, t.five_hour_remaining_path, t.five_hour_reset_time_path, t.weekly_total_path, t.weekly_used_path, t.weekly_remaining_path, t.weekly_reset_time_path],
         )?;
         Ok(())
     }
@@ -256,7 +276,7 @@ impl Database {
     pub fn get_template(&self, provider_key: &str) -> Result<Option<QuotaTemplate>> {
         let c = self.lock()?;
         let r = c.query_row(
-            "SELECT provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json FROM quota_templates WHERE provider_key=?1",
+            "SELECT provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json,unit,reset_time_path,monthly_reset_time_path,five_hour_total_path,five_hour_used_path,five_hour_remaining_path,five_hour_reset_time_path,weekly_total_path,weekly_used_path,weekly_remaining_path,weekly_reset_time_path FROM quota_templates WHERE provider_key=?1",
             params![provider_key],
             map_template_row,
         );
@@ -270,7 +290,7 @@ impl Database {
     pub fn list_templates(&self) -> Result<Vec<QuotaTemplate>> {
         let c = self.lock()?;
         let mut stmt = c.prepare(
-            "SELECT provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json FROM quota_templates",
+            "SELECT provider_key,name,method,url,headers_json,body,total_path,used_path,remaining_path,monthly_total_path,monthly_used_path,monthly_remaining_path,login_url,token_source,auth_mode,login_username,extra_json,unit,reset_time_path,monthly_reset_time_path,five_hour_total_path,five_hour_used_path,five_hour_remaining_path,five_hour_reset_time_path,weekly_total_path,weekly_used_path,weekly_remaining_path,weekly_reset_time_path FROM quota_templates",
         )?;
         let rows = stmt.query_map([], map_template_row)?;
         let mut v = Vec::new();
@@ -739,6 +759,17 @@ fn map_template_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<QuotaTemplate> {
         auth_mode: r.get(14)?,
         login_username: r.get(15)?,
         extra_json: r.get(16)?,
+        unit: r.get(17)?,
+        reset_time_path: r.get(18)?,
+        monthly_reset_time_path: r.get(19)?,
+        five_hour_total_path: r.get(20)?,
+        five_hour_used_path: r.get(21)?,
+        five_hour_remaining_path: r.get(22)?,
+        five_hour_reset_time_path: r.get(23)?,
+        weekly_total_path: r.get(24)?,
+        weekly_used_path: r.get(25)?,
+        weekly_remaining_path: r.get(26)?,
+        weekly_reset_time_path: r.get(27)?,
     })
 }
 

@@ -132,6 +132,14 @@ zcode-assistant/
 
 完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。最新版要点摘录：
 
+### v0.5.0 (2026-08-21)
+
+**新增**：「登录 Token」新增手动输入入口（≥8 字符，与自动捕获同一 keyring 通道）· 用量模板对齐 cc-switch：四桶口径（主桶 / 每5小时 / 每周）+ 双环展示；新增「配额单位 %」· 新增 智谱国际 / MiniMax 国际 / Qwen Token Plan 三组内置预设 · Token 提取支持 `cookie:*` 完整 cookie 串（Windows 含 HttpOnly）· 启动引导主供应商（智谱 Coding Plan → 第一个用户供应商），全新环境不再因「无主供应商」报错刷屏。
+
+**变更**：OpenRouter 目录新增输出长度字段 `max_completion_tokens`（缺省 131072 兜底），导出 cc-switch/opencode 不再因 limit.output 缺失失败。
+
+**修复**：供应商卡片「剩 0% 却判可用」（改用 Math.round 取整口径统一显示/可用判定）· 重置时间优先展示已耗尽桶（耗尽时月→周→5h）· 美化主题补全 panel / sidebar / header / input 四个 token（侧栏与输入栏不再留浅色）· 毛玻璃与背景图在界面挂载后真正可见——三层修复（运行时 JS 补丁穿透 Tailwind 字面量色值 + 表面 token 补全 + 混色源改用主题基色），新增 `zcode-custom.js` 给最大 ≤6 个大面块加真实 backdrop-filter 磨砂 · cc-switch 同步后 opencode「Configuration is invalid」（reasoning 改 boolean、limit.output 缺省兜底）。
+
 ### v0.4.1 (2026-08-20)
 
 **修复**：应用内更新启动安装器 os error 740（perMachine 安装包改用 ShellExecuteW("runas") 提权启动，弹 UAC 确认）· 「覆盖启动」生产版不生效（避开单实例锁竞态，cmd 延迟代理启动）。

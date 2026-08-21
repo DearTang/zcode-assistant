@@ -48,6 +48,20 @@ pub struct QuotaTemplate {
     pub monthly_used_path: Option<String>,
     #[serde(default)]
     pub monthly_remaining_path: Option<String>,
+    /// 每5小时窗口（可选）：配置后同一响应里再提取「每5小时使用额度」桶
+    #[serde(default)]
+    pub five_hour_total_path: Option<String>,
+    #[serde(default)]
+    pub five_hour_used_path: Option<String>,
+    #[serde(default)]
+    pub five_hour_remaining_path: Option<String>,
+    /// 每周窗口（可选）：配置后同一响应里再提取「每周使用额度」桶
+    #[serde(default)]
+    pub weekly_total_path: Option<String>,
+    #[serde(default)]
+    pub weekly_used_path: Option<String>,
+    #[serde(default)]
+    pub weekly_remaining_path: Option<String>,
     /// 登录页 URL：配「登录获取 Token」弹内嵌窗口加载（用户登录含 2FA）
     #[serde(default)]
     pub login_url: Option<String>,
@@ -66,6 +80,21 @@ pub struct QuotaTemplate {
     /// 火山方舟 {accessKeyId,secretAccessKey}（仅存本机数据库）
     #[serde(default)]
     pub extra_json: Option<String>,
+    /// 配额单位："%" → 百分比（提取值 ≤ 1.0 自动 ×100，total 兜底 100）；缺省 = 绝对值
+    #[serde(default)]
+    pub unit: Option<String>,
+    /// 重置时间 dot path（毫秒/秒时间戳或 ISO 字符串）→ 提取到 bucket.periodEnd
+    #[serde(default)]
+    pub reset_time_path: Option<String>,
+    /// 每5小时窗口重置时间 dot path
+    #[serde(default)]
+    pub five_hour_reset_time_path: Option<String>,
+    /// 每周窗口重置时间 dot path
+    #[serde(default)]
+    pub weekly_reset_time_path: Option<String>,
+    /// 月限额重置时间 dot path
+    #[serde(default)]
+    pub monthly_reset_time_path: Option<String>,
 }
 
 /// 自动切换规则：cron（指定执行时间/星期→切到目标）或 drain（配额耗尽→切到目标）

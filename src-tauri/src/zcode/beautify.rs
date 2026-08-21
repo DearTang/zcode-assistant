@@ -5,12 +5,31 @@
 //! 写到 `out/renderer/assets/zcode-custom.css`。因该 link 在主样式表之后加载，
 //! CSS 源顺序取胜，可覆盖 ZCode 自带样式。
 //!
-//! 换肤靠覆盖 CSS 变量（ZCode 主样式表用 ~501 个 token，亮色 `:root,:host`、暗色 `.dark`）。
+//! 换肤靠覆盖 CSS 变量（ZCode 主样式表用 ~501 个 token）。preset_vars 同时覆盖
+//! 背景/表面/卡片/前景/主色/边框/品牌色/强调色 + 面板/侧栏/头部/输入栏（侧栏与
+//! 输入栏默认引用 neutral-100/200 等浅色 token，仅覆盖 background/-surface 等
+//! 不足以让整页主题一致）；输入栏加 `--color-input`。
+//!
+//! ZCode 的 React 子组件大量用 `bg-neutral-50/100` 等 Tailwind 直写背景色（不
+//! 引用 CSS 变量），CSS 变量无法覆盖字面量。开启毛玻璃 / 背景图时把这些调色板
+//! token 按配置透明度混色覆写（混色源 = 主题/自定义背景色，亮/暗分档避免误伤
+//! 文字色），让 acrylic + 背景图透出；未开毛玻璃 / 背景图时不输出这些覆写。
+//!
+//! **运行时 JS 补丁（zcode-custom.js）**：ZCode 主样式表里大量工具类被 Tailwind
+//! 编译为字面量色值（如 `.bg-background/95 → #fafafae6`、`.dark:bg-[#484A58]`），
+//! CSS 变量覆写与类名枚举都够不着——这是「背景图只在启动屏可见、界面挂载后被
+//! 盖住」的根因。注入的 JS 在 React 挂载后用 MutationObserver 持续把计算样式
+//! 为不透明的背景改写为配置透明度，并给大面块加 backdrop-filter（真磨砂）。
+//! JS 由 CSS 里的 `--zq-alpha` / `--zq-blur` 开关：未开启透明特性时变量缺失，
+//! JS 自动空转。
+//!
 //! 完整性校验已关闭，重打包安全（详见 asar.rs）。
 //!
 //! 毛玻璃：ZCode 在 Windows 上默认启用 acrylic 窗口材质，但被不透明的表面 token
-//! （--color-background/-panel/-sidebar/-header）盖住；这里用 color-mix 混入透明让其透出。
-//! 背景图：复制到 assets/zcode-bg.<ext> 后用 body::before 固定图层承载，透过半透明表面显现。
+//! 盖住；这里用 color-mix 混入透明让其透出。
+//! 背景图：复制到 assets/zcode-bg.<ext> 后用 html::before 固定图层承载，期望
+//! 内容区使用引用 CSS 变量的半透明色时透出图。注意：被写死 tailwind 颜色遮
+//! 挡的部分不可穿透（见上）。
 //!
 //! 原则上同时覆盖 `:root,:host` 与 `.dark` 两个作用域，保证亮/暗模式都生效。
 use crate::zcode::asar;
@@ -22,6 +41,7 @@ use std::path::Path;
 
 const INDEX_HTML: &str = "out/renderer/index.html";
 const CUSTOM_CSS_NAME: &str = "zcode-custom.css";
+const CUSTOM_JS_NAME: &str = "zcode-custom.js";
 const INJECT_MARK: &str = "zcode-custom.css"; // 用于判断是否已注入
 
 /// 美化配置。持久化到 zcode-assistant app data，不写 ZCode 的 setting.json。
@@ -86,9 +106,12 @@ impl Default for BeautifyConfig {
 
 // ───────────────────────── 预设主题 ─────────────────────────
 
-/// 返回某预设主题的 (CSS 变量名, 值) 列表。核心 token 集合，覆盖背景/表面/前景/主色/边框/品牌色。
+/// 返回某预设主题的 (CSS 变量名, 值) 列表。覆盖背景 / 背景alt / 表面 / 卡片 /
+/// 前景 / 主色 / 边框 / 品牌色 / 强调色 + 面板 / 侧栏 / 头部 / 输入栏
+/// （后四者默认引用 neutral-100/200 等浅色 token，不覆盖会留下浅色侧栏/输入栏）。
 fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
     // 各 token: 背景 / 背景alt / 表面 / 卡片 / 前景 / 主色 / 边框 / 品牌色 / 强调色
+    //          / 面板 / 侧栏 / 头部 / 输入栏
     let v = match theme {
         "midnight" => vec![
             ("--color-background", "#0b1020"),
@@ -100,6 +123,10 @@ fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
             ("--color-border", "#2a3558"),
             ("--color-brand", "#7c8cff"),
             ("--color-accent", "#5b8cff"),
+            ("--color-panel", "var(--color-surface)"),
+            ("--color-sidebar", "var(--color-surface)"),
+            ("--color-header", "var(--color-surface)"),
+            ("--color-input", "var(--color-surface)"),
         ],
         "nord" => vec![
             ("--color-background", "#2e3440"),
@@ -111,6 +138,10 @@ fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
             ("--color-border", "#434c5e"),
             ("--color-brand", "#88c0d0"),
             ("--color-accent", "#81a1c1"),
+            ("--color-panel", "var(--color-surface)"),
+            ("--color-sidebar", "var(--color-surface)"),
+            ("--color-header", "var(--color-surface)"),
+            ("--color-input", "var(--color-surface)"),
         ],
         "dracula" => vec![
             ("--color-background", "#282a36"),
@@ -122,6 +153,10 @@ fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
             ("--color-border", "#44475a"),
             ("--color-brand", "#bd93f9"),
             ("--color-accent", "#ff79c6"),
+            ("--color-panel", "var(--color-surface)"),
+            ("--color-sidebar", "var(--color-surface)"),
+            ("--color-header", "var(--color-surface)"),
+            ("--color-input", "var(--color-surface)"),
         ],
         "gruvbox" => vec![
             ("--color-background", "#282828"),
@@ -133,6 +168,10 @@ fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
             ("--color-border", "#504945"),
             ("--color-brand", "#fabd2f"),
             ("--color-accent", "#fe8019"),
+            ("--color-panel", "var(--color-surface)"),
+            ("--color-sidebar", "var(--color-surface)"),
+            ("--color-header", "var(--color-surface)"),
+            ("--color-input", "var(--color-surface)"),
         ],
         "tokyo-night" => vec![
             ("--color-background", "#1a1b26"),
@@ -144,6 +183,10 @@ fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
             ("--color-border", "#414868"),
             ("--color-brand", "#7aa2f7"),
             ("--color-accent", "#bb9af7"),
+            ("--color-panel", "var(--color-surface)"),
+            ("--color-sidebar", "var(--color-surface)"),
+            ("--color-header", "var(--color-surface)"),
+            ("--color-input", "var(--color-surface)"),
         ],
         "rose-pine" => vec![
             ("--color-background", "#191724"),
@@ -155,6 +198,10 @@ fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
             ("--color-border", "#403d52"),
             ("--color-brand", "#c4a7e7"),
             ("--color-accent", "#ebbcba"),
+            ("--color-panel", "var(--color-surface)"),
+            ("--color-sidebar", "var(--color-surface)"),
+            ("--color-header", "var(--color-surface)"),
+            ("--color-input", "var(--color-surface)"),
         ],
         _ => return None,
     };
@@ -222,13 +269,18 @@ fn preset_bg_color(theme: &str) -> Option<&'static str> {
 }
 
 /// 生成某一作用域（亮/暗）的表面半透明覆盖声明。
-/// 基色优先级：自定义/主题背景色（统一染色 panel/sidebar/header）> ZCode 默认色板。
+/// 基色优先级：自定义/主题背景色（统一染色全部表面 token）> ZCode 默认色板。
 /// 不直接引用自身 token（`--color-background: ... var(--color-background)` 会构成循环），
 /// 而是引用底层调色板 token 或已知的自定义色。
+/// 覆盖面：background + panel/sidebar/header/input + card/popover/secondary——
+/// 后三者（卡片/弹层/次级面）缺了会导致聊天气泡卡片、弹窗、输入栏仍为实心，
+/// 把背景图 / acrylic 盖住（真机 styles-*.css 实测这些 token 均被 bg 工具类引用）。
+/// 注意：**不能覆盖 `--color-surface`**——它是调色板混色的锚点且本身近透明，
+/// 覆盖会构成循环引用导致整链失效。
 fn frosted_block(light: bool, base: Option<&str>, alpha_pct: i32) -> String {
     let mix = |c: &str| format!("color-mix(in oklab, {} {}%, transparent)", c, alpha_pct);
-    // ZCode 默认：亮 bg=neutral-50、panel/sidebar/header=neutral-100；
-    //            暗 bg/panel/header=neutral-900、sidebar=neutral-950。
+    // ZCode 默认：亮 bg=neutral-50、panel/sidebar/header/card=neutral-100；
+    //            暗 bg/card/header=neutral-900、sidebar=neutral-950。
     let (bg, side, head) = match (light, base) {
         (_, Some(c)) => (mix(c), mix(c), mix(c)),
         (true, None) => (
@@ -243,7 +295,7 @@ fn frosted_block(light: bool, base: Option<&str>, alpha_pct: i32) -> String {
         ),
     };
     format!(
-        "  --color-background: {bg};\n  --color-panel: {side};\n  --color-sidebar: {side};\n  --color-header: {head};\n"
+        "  --color-background: {bg};\n  --color-card: {side};\n  --color-popover: {side};\n  --color-secondary: {head};\n  --color-panel: {side};\n  --color-sidebar: {side};\n  --color-header: {head};\n  --color-input: {head};\n"
     )
 }
 
@@ -319,15 +371,97 @@ pub fn generate_css(cfg: &BeautifyConfig) -> String {
         s.push_str(".dark {\n");
         s.push_str(&frosted_block(false, base, alpha));
         s.push_str("}\n");
+
+        // 运行时 JS 补丁开关（见 patcher_js）：主样式表里大量工具类被 Tailwind
+        // 编译为字面量色值，CSS 层够不着，只能由注入的 zcode-custom.js 在运行时
+        // 改写。JS 检测到 --zq-alpha 存在且 <1 才启动；关闭透明特性后变量缺失，
+        // JS 自动空转，不碰任何元素。
+        s.push_str("/* 运行时补丁开关：zcode-custom.js 据此启动。*/\n");
+        s.push_str(":root, :host {\n");
+        s.push_str(&format!(
+            "  --zq-alpha: {:.2};\n  --zq-blur: 22px;\n}}\n",
+            cfg.surface_opacity.clamp(0.2, 1.0)
+        ));
+
+        // ZCode 主样式表的 .bg-* 工具类全部引用 var(--color-neutral-*) 等
+        // 调色板 token（Tailwind v4 模式），直接覆盖这些 token 为半透明主题色，
+        // 即可让所有直写容器背景统一透出 acrylic / 背景图（比逐类名覆写更全面）。
+        // **按模式分档覆盖**，避免误伤文字色：亮色模式下浅档（50–300）是背景、
+        // 文字用深档（700 等）；暗色模式相反。--color-white 同理只在亮色覆盖
+        // （暗色的 text-white 不动）。
+        // 混色源：优先主题/自定义背景色（整页统一色调）；否则退回 ZCode 的
+        // --color-surface——但真机实测该 token 本身是近透明色（oklab … / 0.03），
+        // 再混一次 transparent 结果几乎全透明，surface_opacity 形同虚设，
+        // 因此无 base 时才用它兜底。
+        let mix_src = base.unwrap_or("var(--color-surface)");
+        let mix_sur = format!("color-mix(in oklab, {mix_src} {alpha}%, transparent)");
+        s.push_str("/* 调色板 token 半透明覆写（.bg-* 工具类均引用；按亮/暗分档避免误伤文字色）。*/\n");
+        s.push_str(":root:not(.dark), :host:not(.dark) {\n");
+        for tok in [
+            "--color-neutral-50",
+            "--color-neutral-100",
+            "--color-neutral-200",
+            "--color-neutral-300",
+            "--color-zinc-50",
+            "--color-zinc-100",
+            "--color-zinc-200",
+            "--color-zinc-300",
+            "--color-slate-50",
+            "--color-slate-100",
+            "--color-slate-200",
+            "--color-gray-50",
+            "--color-gray-100",
+            "--color-gray-200",
+            "--color-white",
+        ] {
+            s.push_str(&format!("  {tok}: {mix_sur};\n"));
+        }
+        s.push_str("}\n.dark {\n");
+        for tok in [
+            "--color-neutral-800",
+            "--color-neutral-900",
+            "--color-neutral-950",
+            "--color-zinc-800",
+            "--color-zinc-900",
+            "--color-zinc-950",
+            "--color-slate-800",
+            "--color-slate-900",
+            "--color-slate-950",
+            "--color-gray-800",
+            "--color-gray-900",
+            "--color-gray-950",
+        ] {
+            s.push_str(&format!("  {tok}: {mix_sur};\n"));
+        }
+        s.push_str("}\n");
+
+        // 类名级覆写作双保险（防御个别工具类未走 token 引用的版本差异）
+        s.push_str(
+            "/* 直写 tailwind 容器背景：覆写为半透明主题色，让 acrylic / 背景图透出。*/\n",
+        );
+        s.push_str(
+            "html, body, #root { background: transparent !important; }\n",
+        );
+        s.push_str(&format!(
+            ".bg-neutral-50, .bg-neutral-100, .bg-neutral-200, .bg-zinc-50, .bg-zinc-100, .bg-zinc-200, .bg-slate-50, .bg-slate-100, .bg-slate-200, .bg-gray-50, .bg-gray-100, .bg-white {{ background-color: {mix_sur} !important; }}\n",
+        ));
+        s.push_str(&format!(
+            ".dark .bg-neutral-900, .dark .bg-neutral-950, .dark .bg-neutral-800, .dark .bg-zinc-900, .dark .bg-zinc-950, .dark .bg-slate-900, .dark .bg-slate-950, .dark .bg-gray-900, .dark .bg-gray-950 {{ background-color: {mix_sur} !important; }}\n",
+        ));
     }
 
     if let Some(name) = &bg_asset {
         // 背景图层：固定在内容之下（z-index:-1），透过上方半透明表面显现。
+        // 直写 tailwind 字面量色的容器由运行时 zcode-custom.js 改透明（见上），
+        // CSS 层只负责变量引用类的表面。
         let op = cfg.bg_image_opacity.clamp(0.1, 1.0);
         s.push_str("/* 背景图层：固定在内容之下，透过上方半透明表面显现。*/\n");
         s.push_str(&format!(
-            "body::before {{\n  content: \"\";\n  position: fixed;\n  inset: 0;\n  z-index: -1;\n  background: url(\"./{name}\") center / cover no-repeat;\n  opacity: {op:.2};\n  pointer-events: none;\n}}\n"
+            "html::before {{ content: \"\"; position: fixed; inset: 0; z-index: -1; background: url(\"./{name}\") center / cover no-repeat; opacity: {op:.2}; pointer-events: none; }}\n"
         ));
+        // 确保 html/body 透明不挡住图层（ZCode 已把这两层 bg 设 transparent，但
+        // 防御性重写，避免 ZCode 版本变更时出现 opaque html 把图层盖死）
+        s.push_str("html, body { background: transparent !important; }\n");
     }
     s
 }
@@ -351,6 +485,151 @@ pub fn test_css() -> &'static str {
 "
 }
 
+/// 运行时补丁脚本（注入为 assets/zcode-custom.js）。
+///
+/// 解决 CSS 层够不着的问题：ZCode 主样式表把大量工具类编译为字面量色值
+/// （`.bg-background/95 → #fafafae6`、`.dark:bg-[#484A58]`），CSS 变量覆写与
+/// 类名枚举都无法触达。本脚本在 React 挂载前后持续工作：
+///
+/// 1. **开关**：读取 CSS 变量 `--zq-alpha`，缺失或 ≥1（未开透明特性）立即退出，
+///    不碰任何元素——因此脚本可以无条件注入。
+/// 2. **透明化**：MutationObserver 监听 DOM 变化（rAF 去抖，扫描期间断开观察
+///    避免自触发循环），把计算样式为不透明（α≥0.99）的 backgroundColor 改写为
+///    同色 + 目标透明度。`data-zq-bg` 标记已处理元素防重复；React 重渲染只会
+///    改 class，内联样式与 dataset 保留，不会被冲掉。
+/// 3. **真磨砂**：在已透明化的大面块（≥12% 视口、≥40px、视口内）里挑最大的
+///    ≤6 块加 `backdrop-filter: blur()`，跳过已有模糊祖先（避免叠加卡顿）。
+/// 4. **排除**：#loading 启动屏（保持启动观感）、pre/code（代码可读性）、
+///    svg/img/video/canvas/iframe/picture（媒体元素）。
+///
+/// 注意保持 ES5 兼容写法（var / function），Electron 旧内核也能跑。
+fn patcher_js() -> &'static str {
+    r#"/*! zcode-custom.js — 由 zcode-assistant 生成，请勿手动编辑。
+ * 运行时表面透明 + backdrop-filter 磨砂补丁。开关：CSS 变量 --zq-alpha（0<x<1 启用）。
+ */
+(function () {
+  "use strict";
+  if (window.__ZQ_BEAUTIFY__) return;
+  window.__ZQ_BEAUTIFY__ = true;
+
+  var cs0 = getComputedStyle(document.documentElement);
+  var ALPHA = parseFloat(cs0.getPropertyValue("--zq-alpha"));
+  if (!isFinite(ALPHA) || ALPHA <= 0 || ALPHA >= 1) return; // 未开启透明特性：空转
+  var BLUR = parseFloat(cs0.getPropertyValue("--zq-blur"));
+  if (!isFinite(BLUR) || BLUR <= 0) BLUR = 22;
+
+  var MAX_BLUR = 6;
+  var MIN_BLUR_SIZE = 40;
+  var MIN_BLUR_AREA = 0.12; // 占视口面积比例
+  var blurred = [];
+
+  function parseColor(s) {
+    var m = /^rgba?\(([^)]+)\)$/i.exec(s);
+    if (m) {
+      var p = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
+      if (p.length >= 3 && p.every(isFinite)) {
+        return { r: Math.round(p[0]), g: Math.round(p[1]), b: Math.round(p[2]), a: p.length > 3 ? p[3] : 1 };
+      }
+      return null;
+    }
+    m = /^color\(\s*srgb\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)(?:\s*\/\s*([0-9.]+))?\s*\)$/i.exec(s);
+    if (m) {
+      return { r: Math.round(+m[1] * 255), g: Math.round(+m[2] * 255), b: Math.round(+m[3] * 255), a: m[4] === undefined ? 1 : +m[4] };
+    }
+    return null;
+  }
+
+  function excluded(el) {
+    if (el.id === "loading") return true;
+    var t = el.tagName;
+    if (t === "PRE" || t === "CODE" || t === "SVG" || t === "IMG" || t === "VIDEO" || t === "CANVAS" || t === "IFRAME" || t === "PICTURE") return true;
+    if (el.closest && el.closest("pre,code,#loading")) return true;
+    return false;
+  }
+
+  function patch(el) {
+    if (el.dataset && el.dataset.zqBg) return; // 已处理
+    if (excluded(el)) return;
+    var bg;
+    try { bg = getComputedStyle(el).backgroundColor; } catch (e) { return; }
+    var c = bg ? parseColor(bg) : null;
+    if (!c || c.a < 0.99) return; // 已透明 / 渐变无底色 / 无法解析：跳过
+    el.style.backgroundColor = "rgba(" + c.r + "," + c.g + "," + c.b + "," + ALPHA + ")";
+    if (el.dataset) el.dataset.zqBg = "1";
+  }
+
+  function scan(root) {
+    if (!root || root.nodeType !== 1 || !root.querySelectorAll) return;
+    patch(root);
+    var list = root.querySelectorAll("*");
+    for (var i = 0; i < list.length; i++) patch(list[i]);
+    blurPass();
+  }
+
+  function hasBlurredAncestor(el) {
+    for (var p = el.parentElement; p; p = p.parentElement) {
+      if (p.dataset && p.dataset.zqBlur) return true;
+    }
+    return false;
+  }
+
+  function blurPass() {
+    for (var i = 0; i < blurred.length; i++) {
+      var b = blurred[i];
+      b.style.backdropFilter = "";
+      b.style.webkitBackdropFilter = "";
+      if (b.dataset) delete b.dataset.zqBlur;
+    }
+    blurred = [];
+    var vw = window.innerWidth, vh = window.innerHeight;
+    if (!vw || !vh) return;
+    var marked = document.querySelectorAll('[data-zq-bg="1"]');
+    var cand = [];
+    for (var i = 0; i < marked.length; i++) {
+      var el = marked[i];
+      var r = el.getBoundingClientRect();
+      if (r.width < MIN_BLUR_SIZE || r.height < MIN_BLUR_SIZE) continue;
+      if (r.width * r.height < vw * vh * MIN_BLUR_AREA) continue;
+      if (r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) continue;
+      cand.push({ el: el, area: r.width * r.height });
+    }
+    cand.sort(function (a, b) { return b.area - a.area; });
+    for (var j = 0; j < cand.length && blurred.length < MAX_BLUR; j++) {
+      var el = cand[j].el;
+      if (hasBlurredAncestor(el)) continue;
+      var v = "blur(" + BLUR + "px)";
+      el.style.backdropFilter = v;
+      el.style.webkitBackdropFilter = v;
+      if (el.dataset) el.dataset.zqBlur = "1";
+      blurred.push(el);
+    }
+  }
+
+  var obs = null;
+  var scheduled = false;
+  function scheduleScan() {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(function () {
+      scheduled = false;
+      if (obs) obs.disconnect(); // 扫描期间断开，避免自身样式写入触发死循环
+      try { scan(document.body); } finally { if (obs) obs.observe(document.documentElement, OBS_OPTS); }
+    });
+  }
+  var OBS_OPTS = { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] };
+  function start() {
+    obs = new MutationObserver(scheduleScan);
+    scheduleScan();
+    obs.observe(document.documentElement, OBS_OPTS);
+  }
+  if (document.body) start();
+  else document.addEventListener("DOMContentLoaded", start, { once: true });
+})();
+"#
+}
+
+
+
 // ───────────────────────── 注入 ─────────────────────────
 
 /// 判断解包目录的 index.html 是否已注入自定义 CSS link。
@@ -361,13 +640,17 @@ pub fn is_injected(extracted_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// 把 css_content 写入 assets/zcode-custom.css，并在 index.html 的 </head> 前注入 link。
+/// 把 css_content 写入 assets/zcode-custom.css、运行时补丁写入
+/// assets/zcode-custom.js，并在 index.html 的 </head> 前注入 link + script。
 /// 若提供 bg_image_src，则把图片复制为 assets/zcode-bg.<ext>（先清掉旧背景图）。
-/// 幂等：link 已存在则不重复插入（仅更新 css 文件内容）。
+/// 幂等：两个标签分别判断是否已存在，只补缺失的那个——因此对「已注入过 CSS
+/// 的旧版 asar」也能原地升级补上 script 标签（文件内容每次都重写）。
 pub fn inject(extracted_dir: &Path, css_content: &str, bg_image_src: Option<&Path>) -> Result<()> {
     let assets_dir = extracted_dir.join("out/renderer/assets");
     fs::create_dir_all(&assets_dir)?;
     fs::write(assets_dir.join(CUSTOM_CSS_NAME), css_content)?;
+    // JS 内容为常量且自带开关（无 --zq-alpha 时空转），无条件写入无害
+    fs::write(assets_dir.join(CUSTOM_JS_NAME), patcher_js())?;
 
     // 清理上一次注入的背景图，避免配置移除后残留
     if let Ok(entries) = fs::read_dir(&assets_dir) {
@@ -383,20 +666,31 @@ pub fn inject(extracted_dir: &Path, css_content: &str, bg_image_src: Option<&Pat
             .with_context(|| format!("复制背景图失败：{}", src.display()))?;
     }
 
+    let css_link = format!(
+        "    <link rel=\"stylesheet\" href=\"./assets/{CUSTOM_CSS_NAME}\">\n"
+    );
+    let js_tag = format!(
+        "    <script defer src=\"./assets/{CUSTOM_JS_NAME}\"></script>\n"
+    );
     let html_path = extracted_dir.join(INDEX_HTML);
     let html = fs::read_to_string(&html_path)
         .with_context(|| format!("读取 {} 失败", INDEX_HTML))?;
-    if html.contains(INJECT_MARK) {
-        return Ok(()); // 已注入 link
+    if html.contains(&css_link) && html.contains(&js_tag) {
+        return Ok(()); // 两个标签都在，仅更新了文件内容
     }
     let Some(idx) = html.find("</head>") else {
         return Err(anyhow::anyhow!("index.html 未找到 </head> 注入锚点"));
     };
     let (before, after) = html.split_at(idx);
-    let new_html = format!(
-        "{}    <link rel=\"stylesheet\" href=\"./assets/{}\">\n{}",
-        before, CUSTOM_CSS_NAME, after
-    );
+    let mut new_html = String::with_capacity(html.len() + css_link.len() + js_tag.len());
+    new_html.push_str(before);
+    if !html.contains(&css_link) {
+        new_html.push_str(&css_link);
+    }
+    if !html.contains(&js_tag) {
+        new_html.push_str(&js_tag);
+    }
+    new_html.push_str(after);
     fs::write(&html_path, new_html)?;
     Ok(())
 }
@@ -545,7 +839,8 @@ mod tests {
     use super::*;
 
     /// 离线验证 inject() 全链路（不触碰真实 app.asar）：
-    /// CSS 写入、背景图复制、旧背景图清理、html link 注入与幂等。
+    /// CSS/JS 写入、背景图复制、旧背景图清理、link + script 注入、幂等与
+    /// 「已注入过 CSS 的旧版 asar」升级补 script。
     #[test]
     fn inject_offline_with_bg_image() {
         let work = std::env::temp_dir().join("zcode_beautify_inject_test");
@@ -570,20 +865,37 @@ mod tests {
             fs::read_to_string(assets.join(CUSTOM_CSS_NAME)).unwrap(),
             "/* test css */"
         );
+        assert!(
+            assets.join(CUSTOM_JS_NAME).exists(),
+            "运行时补丁脚本未写入"
+        );
         assert!(assets.join("zcode-bg.png").exists(), "背景图未按源扩展名复制");
         assert!(!assets.join("zcode-bg.jpg").exists(), "旧背景图未清理");
         let html = fs::read_to_string(extracted.join(INDEX_HTML)).unwrap();
         assert!(html.contains(r#"<link rel="stylesheet" href="./assets/zcode-custom.css">"#));
         assert!(
+            html.contains(r#"<script defer src="./assets/zcode-custom.js"></script>"#),
+            "script 标签未注入"
+        );
+        assert!(
             html.find("zcode-custom.css").unwrap() < html.find("</head>").unwrap(),
             "link 未注入到 </head> 之前"
         );
 
-        // 幂等 + 移除背景图场景：link 不重复插入，旧背景图被清掉
+        // 幂等 + 移除背景图场景：link/script 均不重复插入，旧背景图被清掉
         inject(&extracted, "/* test css 2 */", None).unwrap();
         let html = fs::read_to_string(extracted.join(INDEX_HTML)).unwrap();
         assert_eq!(html.matches("zcode-custom.css").count(), 1, "link 重复注入");
+        assert_eq!(html.matches("zcode-custom.js").count(), 1, "script 重复注入");
         assert!(!assets.join("zcode-bg.png").exists(), "移除背景图后未清理");
+
+        // 升级路径：手工构造「只有 CSS link 的旧版 asar」，inject 应补上 script
+        let old_html = html.replace(r#"<script defer src="./assets/zcode-custom.js"></script>"#, "");
+        fs::write(extracted.join(INDEX_HTML), old_html).unwrap();
+        inject(&extracted, "/* test css 3 */", None).unwrap();
+        let html = fs::read_to_string(extracted.join(INDEX_HTML)).unwrap();
+        assert_eq!(html.matches("zcode-custom.css").count(), 1);
+        assert_eq!(html.matches("zcode-custom.js").count(), 1, "旧版 asar 未补上 script 标签");
 
         let _ = fs::remove_dir_all(&work);
     }

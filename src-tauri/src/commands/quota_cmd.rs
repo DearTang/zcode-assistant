@@ -302,6 +302,19 @@ pub async fn fetch_coding_plan(state: &AppState) -> Result<QuotaOverview, String
     fetch_zhipu_quota(state, &api_key, &provider_name, "https://bigmodel.cn", None).await
 }
 
+/// 构造空的 QuotaOverview（无主供应商且无智谱 Coding Plan 时返回，避免错误 toast）
+fn empty_overview() -> QuotaOverview {
+    QuotaOverview {
+        source: "none".into(),
+        provider_name: None,
+        account_label: None,
+        plan_name: None,
+        buckets: vec![],
+        fetched_at: chrono::Utc::now().to_rfc3339(),
+        error: None,
+    }
+}
+
 #[tauri::command]
 pub async fn get_coding_plan_quota(
     state: State<'_, AppState>,
@@ -321,6 +334,64 @@ fn extract_by_path(v: &Value, path: &str) -> Option<f64> {
     }
     cur.as_f64()
         .or_else(|| cur.as_str().and_then(|s| s.parse().ok()))
+}
+
+/// 按 dot path 提取重置时间（毫秒/秒时间戳自动判，ISO 字符串原样返回）
+fn extract_reset_from_resp(resp: &Value, path: &str) -> Option<String> {
+    let mut cur = resp;
+    for seg in path.split('.') {
+        cur = if let Ok(i) = seg.parse::<usize>() {
+            cur.get(i)?
+        } else {
+            cur.get(seg)?
+        };
+    }
+    if let Some(n) = cur.as_f64() {
+        let n = n as i64;
+        if n <= 0 {
+            return None;
+        }
+        if n >= 1_000_000_000_000 {
+            return chrono::DateTime::from_timestamp_millis(n).map(|d| d.to_rfc3339());
+        }
+        return chrono::DateTime::from_timestamp_millis(n * 1000).map(|d| d.to_rfc3339());
+    }
+    cur.as_str().filter(|s| !s.is_empty()).map(String::from)
+}
+
+/// 按一组路径（total/used/remaining + 重置时间）从响应构建一个配额桶。
+/// 任一值路径配置且能提取到数值才返回；百分比模式下值 ≤ 1.0 自动 ×100、total 兜底 100。
+#[allow(clippy::too_many_arguments)]
+fn build_bucket(
+    resp: &Value,
+    name: &str,
+    is_pct: bool,
+    total_p: Option<&str>,
+    used_p: Option<&str>,
+    remaining_p: Option<&str>,
+    reset_p: Option<&str>,
+) -> Option<QuotaBucket> {
+    let to_pct = |v: f64| if is_pct && v <= 1.0 { v * 100.0 } else { v };
+    let total = total_p.and_then(|p| extract_by_path(resp, p));
+    let used = used_p.and_then(|p| extract_by_path(resp, p));
+    let remaining = remaining_p.and_then(|p| extract_by_path(resp, p));
+    if total.is_none() && used.is_none() && remaining.is_none() {
+        return None;
+    }
+    let total = total.map(to_pct).unwrap_or(if is_pct { 100.0 } else { 0.0 });
+    let used = used.map(to_pct).unwrap_or(0.0);
+    let remaining = remaining
+        .map(to_pct)
+        .unwrap_or_else(|| if total > used { total - used } else { 0.0 });
+    let period_end = reset_p.and_then(|p| extract_reset_from_resp(resp, p));
+    Some(QuotaBucket {
+        name: name.to_string(),
+        total,
+        used,
+        remaining,
+        unit: if is_pct { Some("%".to_string()) } else { None },
+        period_end,
+    })
 }
 
 /// 通用模板配额查询核心（按 provider 的配置模板发请求 + dot-path 提取）
@@ -410,59 +481,63 @@ async fn run_template_quota(
         .await
         .map_err(|e| e.to_string())?;
 
-    let total = tmpl
-        .total_path
-        .as_deref()
-        .and_then(|p| extract_by_path(&resp, p));
-    let used = tmpl
-        .used_path
-        .as_deref()
-        .and_then(|p| extract_by_path(&resp, p));
-    let remaining = tmpl
-        .remaining_path
-        .as_deref()
-        .and_then(|p| extract_by_path(&resp, p));
+    let is_pct = tmpl.unit.as_deref() == Some("%");
 
-    let total = total.unwrap_or(0.0);
-    let used = used.unwrap_or(0.0);
-    let remaining = remaining.unwrap_or_else(|| if total > used { total - used } else { 0.0 });
+    // 四类桶（cc-switch 口径）：主桶（余额/通用）+ 每5小时 + 每周 + 每月。
+    // 各组路径可选；任一路径配置且能提取到数值才生成对应桶，全部为空则报错。
+    let mut buckets = Vec::new();
 
-    let mut buckets = vec![QuotaBucket {
-        name: tmpl.name.clone().unwrap_or_else(|| "配额".into()),
-        total,
-        used,
-        remaining,
-        unit: None,
-        period_end: None,
-    }];
+    // 主桶（余额）：用模板名命名（如「DeepSeek 余额」）；只配 5h/weekly 的模板不会生成多余的 0 桶
+    if let Some(b) = build_bucket(
+        &resp,
+        &tmpl.name.clone().unwrap_or_else(|| "配额".into()),
+        is_pct,
+        tmpl.total_path.as_deref(),
+        tmpl.used_path.as_deref(),
+        tmpl.remaining_path.as_deref(),
+        tmpl.reset_time_path.as_deref(),
+    ) {
+        buckets.push(b);
+    }
 
-    // 月限额（可选，部分供应商才有）：配置了任一 monthly path 且能从同一响应中
-    // 提取到数值时，追加「每月使用额度」桶；未配置 / 提取不到则不追加（展示端不显示）
-    let m_total = tmpl
-        .monthly_total_path
-        .as_deref()
-        .and_then(|p| extract_by_path(&resp, p));
-    let m_used = tmpl
-        .monthly_used_path
-        .as_deref()
-        .and_then(|p| extract_by_path(&resp, p));
-    let m_remaining = tmpl
-        .monthly_remaining_path
-        .as_deref()
-        .and_then(|p| extract_by_path(&resp, p));
-    if m_total.is_some() || m_used.is_some() || m_remaining.is_some() {
-        let m_total = m_total.unwrap_or(0.0);
-        let m_used = m_used.unwrap_or(0.0);
-        let m_remaining =
-            m_remaining.unwrap_or_else(|| if m_total > m_used { m_total - m_used } else { 0.0 });
-        buckets.push(QuotaBucket {
-            name: "每月使用额度".into(),
-            total: m_total,
-            used: m_used,
-            remaining: m_remaining,
-            unit: None,
-            period_end: None,
-        });
+    if let Some(b) = build_bucket(
+        &resp,
+        "每5小时使用额度",
+        is_pct,
+        tmpl.five_hour_total_path.as_deref(),
+        tmpl.five_hour_used_path.as_deref(),
+        tmpl.five_hour_remaining_path.as_deref(),
+        tmpl.five_hour_reset_time_path.as_deref(),
+    ) {
+        buckets.push(b);
+    }
+
+    if let Some(b) = build_bucket(
+        &resp,
+        "每周使用额度",
+        is_pct,
+        tmpl.weekly_total_path.as_deref(),
+        tmpl.weekly_used_path.as_deref(),
+        tmpl.weekly_remaining_path.as_deref(),
+        tmpl.weekly_reset_time_path.as_deref(),
+    ) {
+        buckets.push(b);
+    }
+
+    if let Some(b) = build_bucket(
+        &resp,
+        "每月使用额度",
+        is_pct,
+        tmpl.monthly_total_path.as_deref(),
+        tmpl.monthly_used_path.as_deref(),
+        tmpl.monthly_remaining_path.as_deref(),
+        tmpl.monthly_reset_time_path.as_deref(),
+    ) {
+        buckets.push(b);
+    }
+
+    if buckets.is_empty() {
+        return Err("模板未配置提取路径，或响应中无可提取的数值".into());
     }
 
     Ok(QuotaOverview {
@@ -513,19 +588,44 @@ pub async fn get_provider_quota(
 
 /// 总览配额（Dashboard / 悬浮球 / 悬浮面板 / 托盘共用的数据源）：
 ///   1) 设了主供应商 → 查主供应商（Token Plan 供应商自动查询，其余走其用量模板）
-///   2) 未设置 / 主供应商已从 config 移除 → 回退自动识别智谱 Coding Plan（账号确认）
+///      查询失败时回退到 2，不直接报错（避免 broken primary 卡住整个总览）
+///   2) 智谱 Coding Plan（账号确认）
+///   3) 都没有 / 都失败 → 返回空 QuotaOverview（error:None），不触发错误 toast
 pub async fn fetch_overview_quota(state: &AppState) -> Result<QuotaOverview, String> {
+    let cfg = config_file::read_config().ok();
+    let has_provider = |key: &str| {
+        cfg.as_ref()
+            .and_then(|c| c.get("provider"))
+            .and_then(|p| p.as_object())
+            .is_some_and(|m| m.contains_key(key))
+    };
+
+    // 1) 主供应商（失败时静默回退，不 toast）
     if let Some(key) = state.db.primary_provider_key().ok().flatten() {
-        let exists = config_file::read_config().ok().is_some_and(|c| {
-            c.get("provider")
-                .and_then(|p| p.as_object())
-                .is_some_and(|m| m.contains_key(&key))
-        });
-        if exists {
-            return provider_quota(state, &key).await;
+        if has_provider(&key) {
+            if let Ok(q) = provider_quota(state, &key).await {
+                return Ok(q);
+            }
+            // 主供应商配额查询失败 → 回退智谱 Coding Plan
         }
     }
-    fetch_coding_plan(state).await
+
+    // 2) 智谱 Coding Plan（失败时返回空概览，不 toast）
+    let has_zhipu_coding_plan = cfg
+        .as_ref()
+        .and_then(|c| c.get("provider"))
+        .and_then(|p| p.as_object())
+        .map(|m| m.keys().any(|k| k.contains("coding-plan")))
+        .unwrap_or(false);
+    if has_zhipu_coding_plan {
+        return match fetch_coding_plan(state).await {
+            Ok(q) => Ok(q),
+            Err(_) => Ok(empty_overview()),
+        };
+    }
+
+    // 3) 无可用源 → 空概览
+    Ok(empty_overview())
 }
 
 /// 总览配额查询（command，主窗口 App 全局轮询调用）

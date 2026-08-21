@@ -171,7 +171,11 @@ export default function Dashboard({
               );
             })}
           {data && data.buckets.length === 0 && (
-            <div className="za-empty">暂无配额数据</div>
+            <div className="za-empty">
+              {data.source === "none"
+                ? "未配置主供应商且未登录智谱 Coding Plan——设置主供应商或登录智谱账号后可查看用量"
+                : "暂无配额数据"}
+            </div>
           )}
           {error && (
             <div className="za-empty" style={{ color: "var(--danger)" }}>

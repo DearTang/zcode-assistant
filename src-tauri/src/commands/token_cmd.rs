@@ -104,6 +104,25 @@ pub fn clear_quota_token(
     Ok(())
 }
 
+/// 手动写入 token（用户从浏览器 DevTools / 其他工具复制后粘贴）。
+/// 走与登录窗自动捕获相同的 save_token 通道：写 keyring + 时间戳 + 广播更新。
+/// 最小长度 8，与自动提取脚本（命中 ≥8 字符才保存）的判定一致。
+#[tauri::command]
+pub fn set_quota_token(
+    app: AppHandle,
+    provider_key: String,
+    token: String,
+) -> Result<(), String> {
+    let token = token.trim().to_string();
+    if token.len() < 8 {
+        return Err("Token 太短（至少 8 字符），请核对后重新粘贴".into());
+    }
+    if !save_token(&app, &provider_key, &token) {
+        return Err("保存 Token 到系统凭证库失败".into());
+    }
+    Ok(())
+}
+
 /// token_source 解析结果（注入脚本用）
 struct ExtractConf {
     mode: &'static str, // "cookie" | "localstorage"
@@ -114,9 +133,9 @@ struct ExtractConf {
 fn parse_source(s: &str) -> Result<ExtractConf, String> {
     let s = s.trim();
     if let Some(key) = s.strip_prefix("cookie:") {
-        if key.is_empty() {
-            return Err("cookie: 后需要写 cookie 名称".into());
-        }
+        // cookie:（留空）或 cookie:* → 提取完整 cookie 串（适合 Cookie 头认证的供应商，
+        // 用户无需逐一猜测哪个 cookie 是认证票据）
+        let key = if key == "*" { "" } else { key };
         return Ok(ExtractConf {
             mode: "cookie",
             key: key.to_string(),
@@ -143,7 +162,7 @@ fn parse_source(s: &str) -> Result<ExtractConf, String> {
             path,
         });
     }
-    Err("提取方式需以 cookie: 或 localstorage: 开头".into())
+    Err("提取方式需以 cookie: 或 localstorage: 开头（cookie: 后留空则提取完整 cookie 串）".into())
 }
 
 /// 注入到登录页的提取脚本：CONF 由 Rust 侧 JSON 序列化嵌入（免转义问题）。
@@ -206,6 +225,10 @@ fn build_script(conf: &ExtractConf, user: &str, pass: &str) -> Result<String, St
   function extract() {{
     try {{
       if (CONF.mode === 'cookie') {{
+        if (!CONF.key) {{
+          // cookie:（留空）→ 返回完整 cookie 串
+          return document.cookie || null;
+        }}
         var esc = CONF.key.replace(/[.*+?^${{}}()|[\]\\]/g, '\\$&');
         var m = document.cookie.match(new RegExp('(?:^|;\\s)' + esc + '=([^;]*)'));
         return m ? decodeURIComponent(m[1]) : null;
@@ -359,21 +382,35 @@ mod win_cookie_poll {
 
     /// 启动轮询线程：每秒查一次 CookieManager，命中目标 cookie（≥8 字符）即
     /// 保存关窗；登录窗口关闭（用户手动关 / 脚本通道已命中）或 10 分钟超时退出。
+    /// cookie_name 为空时提取完整 cookie 串（含 HttpOnly，适合 Cookie 头认证）。
     pub fn spawn(app: AppHandle, provider_key: String, cookie_name: String) {
         std::thread::spawn(move || {
             let want = cookie_name.to_lowercase();
+            let all = want.is_empty();
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
             while std::time::Instant::now() < deadline {
                 if app.get_webview_window("quota-login").is_none() {
                     break;
                 }
                 if let Ok(pairs) = query_once(&app) {
-                    if let Some((_, v)) = pairs.iter().find(|(n, _)| n.to_lowercase() == want) {
-                        if v.len() >= 8 {
-                            if save_token(&app, &provider_key, v) {
-                                if let Some(wv) = app.get_webview_window("quota-login") {
-                                    let _ = wv.close();
-                                }
+                    let token = if all {
+                        // cookie:（留空）→ 拼接完整 cookie 串（含 HttpOnly）
+                        let s = pairs
+                            .iter()
+                            .map(|(n, v)| format!("{n}={v}"))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        if s.is_empty() { None } else { Some(s) }
+                    } else {
+                        pairs
+                            .iter()
+                            .find(|(n, _)| n.to_lowercase() == want)
+                            .map(|(_, v)| v.clone())
+                    };
+                    if let Some(t) = token {
+                        if t.len() >= 8 && save_token(&app, &provider_key, &t) {
+                            if let Some(wv) = app.get_webview_window("quota-login") {
+                                let _ = wv.close();
                             }
                             break;
                         }

@@ -104,20 +104,46 @@ fn to_opencode_entry(key: &str, p: &Value) -> Option<ExportEntry> {
             }
         }
     }
-    // models：保留 name/limit/modalities/reasoning，剥离 zcode / enabled
+    // models：按 opencode schema 白名单导出（zcode 的模型字段与其不完全兼容）：
+    // - name：显示名（缺省用模型 id）
+    // - limit：仅 context 与 output 均为正数时导出——opencode 要求 limit 内两者
+    //   齐备，缺 output 会被判 invalid（如 "Missing key ...limit.output"）
+    // - modalities：输入输出模态（可选，opencode 接受）
+    // 其余全部丢弃：reasoning 在 zcode 是对象（enabled/variants/defaultVariant），
+    // opencode 期望 boolean，原样导出必然校验失败；zcode / enabled 等专有字段同理
     let mut models = Map::new();
     if let Some(ms) = p.get("models").and_then(|m| m.as_object()) {
         for (mid, mv) in ms {
+            let obj = mv.as_object();
             let mut m = Map::new();
-            if let Some(obj) = mv.as_object() {
-                for (k, v) in obj {
-                    if k != "zcode" && k != "enabled" {
-                        m.insert(k.clone(), v.clone());
-                    }
-                }
+            let display_name = obj
+                .and_then(|o| o.get("name"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(mid);
+            m.insert("name".to_string(), json!(display_name));
+            let limit = obj.and_then(|o| o.get("limit")).and_then(|l| l.as_object());
+            // 只要 context 有效就导出 limit（output 缺失/非正时按 131072 兜底，
+            // 不再要求两者都为正--opencode schema 仅要求 limit 内 context/output
+            // 键齐备，值由我们保证为正）
+            let ctx = limit
+                .and_then(|l| l.get("context"))
+                .and_then(|v| v.as_i64())
+                .filter(|c| *c > 0);
+            if let Some(c) = ctx {
+                let out = limit
+                    .and_then(|l| l.get("output"))
+                    .and_then(|v| v.as_i64())
+                    .filter(|o| *o > 0)
+                    .unwrap_or(crate::openrouter::DEFAULT_OUTPUT_LENGTH);
+                let mut lo = Map::new();
+                lo.insert("context".to_string(), json!(c));
+                lo.insert("output".to_string(), json!(out));
+                m.insert("limit".to_string(), Value::Object(lo));
             }
-            m.entry("name".to_string())
-                .or_insert_with(|| json!(mid));
+            if let Some(mods) = obj.and_then(|o| o.get("modalities")) {
+                m.insert("modalities".to_string(), mods.clone());
+            }
             models.insert(mid.clone(), Value::Object(m));
         }
     }

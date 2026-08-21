@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::Manager;
 
-const CATALOG_URL: &str = "https://openrouter.ai/api/frontend/v1/catalog/models";
-const KV_KEY: &str = "openrouter_catalog";
+const CATALOG_URL: &str = "https://openrouter.ai/api/v1/models";
+/// KV key 带版本后缀：换 key 名即让老用户触发一次全量重拉
+/// （v3: 切到标准 API /api/v1/models，解析 top_provider.max_completion_tokens）
+const KV_KEY: &str = "openrouter_catalog_v3";
 
 /// 目录单条记录：模型名（slug/hf_slug 取「/」后段并转小写）+ 真实上下文 + 元数据
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -16,6 +18,9 @@ const KV_KEY: &str = "openrouter_catalog";
 pub struct CatalogEntry {
     pub name: String,
     pub context_length: i64,
+    /// 输出长度上限（接口字段 max_completion_tokens；未提供时默认 131072）
+    #[serde(default = "default_output_length")]
+    pub output_length: i64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_modalities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -24,6 +29,13 @@ pub struct CatalogEntry {
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+}
+
+/// 输出长度默认值（接口未提供 max_completion_tokens 时兜底）
+pub const DEFAULT_OUTPUT_LENGTH: i64 = 131_072;
+
+fn default_output_length() -> i64 {
+    DEFAULT_OUTPUT_LENGTH
 }
 
 /// 完整目录（含拉取时间，按 updated_at 从新到旧排序）
@@ -49,7 +61,7 @@ pub fn load_catalog(db: &Database) -> Option<Catalog> {
         .and_then(|s| serde_json::from_str::<Catalog>(&s).ok())
 }
 
-/// 解析 OpenRouter catalog 响应为目录（按 updated_at 从新到旧）
+/// 解析 OpenRouter 标准 API（/api/v1/models）响应为目录（按 created 从新到旧）
 fn parse_catalog(v: &Value, fetched_at: String) -> Result<Catalog, String> {
     let arr = v
         .get("data")
@@ -58,11 +70,8 @@ fn parse_catalog(v: &Value, fetched_at: String) -> Result<Catalog, String> {
     let mut models: Vec<CatalogEntry> = arr
         .iter()
         .filter_map(|m| {
-            // 模型名：slug（小写）优先，退回 hf_slug；均取「/」后段并转小写
-            let raw = m
-                .get("slug")
-                .and_then(|s| s.as_str())
-                .or_else(|| m.get("hf_slug").and_then(|s| s.as_str()))?;
+            // 模型名：id 取「/」后段并转小写（如 "z-ai/glm-5.3" → "glm-5.3"）
+            let raw = m.get("id").and_then(|s| s.as_str())?;
             let name = raw.rsplit('/').next()?.trim().to_lowercase();
             if name.is_empty() {
                 return None;
@@ -71,32 +80,47 @@ fn parse_catalog(v: &Value, fetched_at: String) -> Result<Catalog, String> {
             if context_length <= 0 {
                 return None;
             }
+            // 输出长度：top_provider.max_completion_tokens，未提供 / 非正时按默认 131072 兜底
+            let output_length = m
+                .get("top_provider")
+                .and_then(|t| t.get("max_completion_tokens"))
+                .and_then(|x| x.as_i64())
+                .filter(|v| *v > 0)
+                .unwrap_or(DEFAULT_OUTPUT_LENGTH);
+            // input_modalities 在 architecture 下
+            let input_modalities = m
+                .get("architecture")
+                .and_then(|a| a.get("input_modalities"))
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            // author 取 id 前段（如 "z-ai"）
+            let author = raw.split('/').next().map(String::from);
+            // created 是 unix 秒
+            let created_at = m
+                .get("created")
+                .and_then(|x| x.as_i64())
+                .filter(|v| *v > 0)
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|d| d.to_rfc3339());
             Some(CatalogEntry {
                 name,
                 context_length,
-                input_modalities: m
-                    .get("input_modalities")
-                    .and_then(|x| x.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|s| s.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                author: m.get("author").and_then(|x| x.as_str()).map(String::from),
-                created_at: m
-                    .get("created_at")
-                    .and_then(|x| x.as_str())
-                    .map(String::from),
-                updated_at: m
-                    .get("updated_at")
-                    .and_then(|x| x.as_str())
-                    .map(String::from),
+                output_length,
+                input_modalities,
+                author,
+                created_at: created_at.clone(),
+                // 标准 API 无 updated_at，用 created_at 近似排序
+                updated_at: created_at,
             })
         })
         .collect();
-    // ISO-8601 UTC 字符串的字典序即时间序，从最新到最早
-    models.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    // 按 created_at 从新到旧排序
+    models.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     Ok(Catalog { fetched_at, models })
 }
 
@@ -141,14 +165,28 @@ pub fn fuzzy_context(catalog: &[CatalogEntry], model_id: &str) -> Option<i64> {
         .map(|e| e.context_length)
 }
 
+/// 模糊匹配：与 fuzzy_context 同样规则，返回目录中的输出长度上限
+/// （解析时已兜底为 DEFAULT_OUTPUT_LENGTH，所以命中必有值）。
+pub fn fuzzy_output(catalog: &[CatalogEntry], model_id: &str) -> Option<i64> {
+    let id = model_id.trim().to_lowercase();
+    if id.is_empty() {
+        return None;
+    }
+    catalog
+        .iter()
+        .find(|e| !e.name.is_empty() && (id.contains(&e.name) || e.name.contains(&id)))
+        .map(|e| e.output_length)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn entry(name: &str, ctx: i64, updated: &str) -> CatalogEntry {
+    fn entry(name: &str, ctx: i64, out: i64, updated: &str) -> CatalogEntry {
         CatalogEntry {
             name: name.to_string(),
             context_length: ctx,
+            output_length: out,
             input_modalities: vec![],
             author: None,
             created_at: None,
@@ -159,40 +197,54 @@ mod tests {
     #[test]
     fn fuzzy_prefers_newest_and_matches_case_insensitive() {
         let catalog = vec![
-            entry("qwen3.8-27b", 262_144, "2026-08-14T17:00:00Z"),
-            entry("qwen3.8-27b-20260801", 131_072, "2026-08-01T00:00:00Z"),
-            entry("glm-4.6", 200_000, "2026-07-01T00:00:00Z"),
+            entry("qwen3.8-27b", 262_144, 8192, "2026-08-14T17:00:00Z"),
+            entry("qwen3.8-27b-20260801", 131_072, 4096, "2026-08-01T00:00:00Z"),
+            entry("glm-4.6", 200_000, 131072, "2026-07-01T00:00:00Z"),
         ];
         // 精确命中（大小写不敏感）
         assert_eq!(
             fuzzy_context(&catalog, "Qwen/Qwen3.8-27B"),
             Some(262_144)
         );
+        assert_eq!(
+            fuzzy_output(&catalog, "Qwen/Qwen3.8-27B"),
+            Some(8192)
+        );
         // id 含目录名 → 命中最新的那条
         assert_eq!(
             fuzzy_context(&catalog, "qwen3.8-27b-instruct"),
             Some(262_144)
         );
+        assert_eq!(
+            fuzzy_output(&catalog, "qwen3.8-27b-instruct"),
+            Some(8192)
+        );
         // 目录名含 id（新版本号）→ 从新到旧取第一个
         assert_eq!(fuzzy_context(&catalog, "glm-4.6"), Some(200_000));
+        assert_eq!(fuzzy_output(&catalog, "glm-4.6"), Some(131072));
         assert_eq!(fuzzy_context(&catalog, "no-such-model"), None);
+        assert_eq!(fuzzy_output(&catalog, "no-such-model"), None);
     }
 
     #[test]
-    fn parse_sorts_by_updated_desc() {
+    fn parse_sorts_by_created_desc() {
+        // 标准 API 形态：id + context_length + created（unix 秒），
+        // 输出长度取 top_provider.max_completion_tokens（缺省兜底 131072）
         let v: Value = serde_json::json!({
             "data": [
-                { "slug": "a/old-model", "context_length": 1000,
-                  "updated_at": "2026-08-01T00:00:00Z", "created_at": "2026-08-01T00:00:00Z",
-                  "input_modalities": ["text"] },
-                { "hf_slug": "A/New-Model", "context_length": 2000,
-                  "updated_at": "2026-08-14T00:00:00Z" }
+                { "id": "vendor/old-model", "context_length": 1000,
+                  "created": 1_700_000_000 },
+                { "id": "Vendor/New-Model", "context_length": 2000,
+                  "top_provider": { "max_completion_tokens": 4096 },
+                  "created": 1_800_000_000 }
             ]
         });
         let c = parse_catalog(&v, "2026-08-18T09:00:00".into()).unwrap();
         assert_eq!(c.models.len(), 2);
-        assert_eq!(c.models[0].name, "new-model"); // hf_slug 后段转小写
+        assert_eq!(c.models[0].name, "new-model"); // id 后段转小写
         assert_eq!(c.models[0].context_length, 2000);
-        assert_eq!(c.models[0].author, None);
+        assert_eq!(c.models[0].output_length, 4096);
+        assert_eq!(c.models[0].author.as_deref(), Some("Vendor")); // id 前段
+        assert_eq!(c.models[1].name, "old-model"); // created 从新到旧
     }
 }

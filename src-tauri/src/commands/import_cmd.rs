@@ -400,7 +400,8 @@ fn import_spec(
             id: id.to_string(),
             name: None,
             context_length: Some(ctx),
-            max_output: None,
+            // 未命中目录时输出按默认值兜底（与目录解析口径一致）
+            max_output: Some(crate::openrouter::DEFAULT_OUTPUT_LENGTH),
         },
         true,
     )
@@ -412,7 +413,7 @@ fn import_spec(
 pub struct ResolvedModel {
     pub id: String,
     pub context: i64,
-    /// 输出上限（仅内置规格表命中时有）
+    /// 输出上限（目录 / 内置命中时为真实值，否则默认 131072）
     pub output: Option<i64>,
 }
 

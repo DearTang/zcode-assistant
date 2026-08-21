@@ -64,7 +64,11 @@ pub(crate) fn matched_spec(
         .as_ref()
         .and_then(|c| crate::openrouter::fuzzy_context(&c.models, model_id))
     {
-        return Some((ctx, None));
+        // 目录命中：上下文 + 输出都取自目录（输出已在解析时兜底为 131072）
+        let out = catalog
+            .as_ref()
+            .and_then(|c| crate::openrouter::fuzzy_output(&c.models, model_id));
+        return Some((ctx, out));
     }
     builtin_spec(model_id).map(|(c, o)| (c, Some(o)))
 }
@@ -137,12 +141,19 @@ pub async fn fetch_available_models(
             let out = m
                 .get("max_output")
                 .and_then(|x| x.as_i64())
-                .or_else(|| builtin_map.get(&id).map(|(_, o)| *o));
+                .or_else(|| m.get("max_completion_tokens").and_then(|x| x.as_i64()))
+                .or_else(|| {
+                    or_catalog
+                        .as_ref()
+                        .and_then(|c| crate::openrouter::fuzzy_output(&c.models, &id))
+                })
+                .or_else(|| builtin_map.get(&id).map(|(_, o)| *o))
+                .unwrap_or(crate::openrouter::DEFAULT_OUTPUT_LENGTH);
             Some(ModelSpec {
                 id,
                 name: None,
                 context_length: ctx,
-                max_output: out,
+                max_output: Some(out),
             })
         })
         .collect();
@@ -536,6 +547,98 @@ pub fn get_primary_provider(state: State<'_, AppState>) -> Result<Option<String>
         .db
         .primary_provider_key()
         .map_err(|e| e.to_string())
+}
+
+/// 启动引导：best-effort 选一个主供应商写入 DB + setting.json，确保总览/悬浮窗有数据源。
+/// 优先级：
+///   1) 已设过主供应商且仍存在 → 不动（仅同步 setting.json 的 family 选中）
+///   2) 智谱 Coding Plan 内置订阅 provider（账号登录态写入 config）→ 选中
+///   3) 否则取第一个 enabled 且带至少一个模型的非 builtin 供应商 → 选中
+///   4) 都没有 → 返回 None（保持主供应商为空，外部走空概览，不报错）
+#[tauri::command]
+pub fn bootstrap_primary(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    let current = state.db.primary_provider_key().ok().flatten();
+    let cfg = config_file::read_config().map_err(|e| e.to_string())?;
+    let providers = cfg
+        .get("provider")
+        .and_then(|p| p.as_object());
+
+    let exists = |k: &str| providers.is_some_and(|m| m.contains_key(k));
+
+    if let Some(k) = current.clone() {
+        if exists(&k) {
+            ensure_setting_family_selected(&k)?;
+            return Ok(Some(k));
+        }
+    }
+
+    let pick_coding_plan = || {
+        providers.and_then(|m| {
+            m.keys()
+                .find(|k| k.contains("coding-plan"))
+                .cloned()
+        })
+    };
+    let pick_first_user_provider = || {
+        providers.and_then(|m| {
+            m.iter()
+                .find(|(k, v)| {
+                    !k.starts_with("builtin:")
+                        && v.get("enabled").and_then(|x| x.as_bool()).unwrap_or(false)
+                        && v.get("models")
+                            .and_then(|x| x.as_object())
+                            .map(|o| !o.is_empty())
+                            .unwrap_or(false)
+                })
+                .map(|(k, _)| k.clone())
+        })
+    };
+
+    let chosen = pick_coding_plan().or_else(pick_first_user_provider);
+    if let Some(k) = chosen {
+        state
+            .db
+            .set_provider_primary(&k, true)
+            .map_err(|e| e.to_string())?;
+        ensure_setting_family_selected(&k)?;
+        Ok(Some(k))
+    } else {
+        Ok(None)
+    }
+}
+
+/// 把 setting.json 的 providerFamilyDomain 与 modelProviderFamilySelectedKeys[family]
+/// 指向给定 provider（已对应该 provider 时不动）。
+fn ensure_setting_family_selected(provider_key: &str) -> Result<(), String> {
+    let mut setting: Value = config_file::read_setting().unwrap_or_else(|_| json!({}));
+    let obj = setting
+        .as_object_mut()
+        .ok_or_else(|| "setting.json 顶层非对象".to_string())?;
+    let family = "bigmodel";
+
+    let already_points_to = obj
+        .get("modelProviderFamilySelectedKeys")
+        .and_then(|m| m.get(family))
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            // 兼容带 mode 前缀（coding-plan:builtin:xxx）的 selectedKey
+            s.rsplit(':').next().unwrap_or(s) == provider_key
+        })
+        .unwrap_or(false);
+
+    if obj.get("providerFamilyDomain").and_then(|v| v.as_str()) == Some(family)
+        && already_points_to
+    {
+        return Ok(());
+    }
+
+    obj.insert("providerFamilyDomain".into(), json!(family));
+    obj.entry("modelProviderFamilySelectedKeys".to_string())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .map(|m| m.insert(family.into(), json!(provider_key)))
+        .ok_or_else(|| "setting.json 的 modelProviderFamilySelectedKeys 非对象".to_string())?;
+    config_file::write_setting(&setting).map_err(|e| e.to_string())
 }
 
 /// 测试 provider 连接结果（供「添加供应商」弹窗的「测试」按钮）
