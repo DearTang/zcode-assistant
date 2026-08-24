@@ -59,6 +59,7 @@ export default function Beautify() {
   const [installed, setInstalled] = useState(false);
   const [hasBackup, setHasBackup] = useState(false);
   const [zcodeVersion, setZcodeVersion] = useState<string>("");
+  const [backupVersion, setBackupVersion] = useState<string>("");
   const [asarPath, setAsarPath] = useState<string>("");
   const [busy, setBusy] = useState<"apply" | "restore" | null>(null);
   const [loading, setLoading] = useState(true);
@@ -73,6 +74,7 @@ export default function Beautify() {
       setInstalled(st.installed);
       setHasBackup(st.has_backup);
       setZcodeVersion(st.zcode_version ?? "");
+      setBackupVersion(st.backup_version ?? "");
       setAsarPath(st.asar_path ?? "");
       // 用已存配置覆盖默认值；无配置则保持默认（编辑态友好起点）
       const c = st.config;
@@ -193,6 +195,9 @@ export default function Beautify() {
   };
 
   const busyNow = busy !== null;
+  // 备份版本与当前 ZCode 不一致 = 备份已过期（升级替换了 app.asar，备份没跟上）
+  const backupStale =
+    hasBackup && !!backupVersion && !!zcodeVersion && backupVersion !== zcodeVersion;
   const translucencyActive = !!cfg.acrylic || !!cfg.bg_image;
   // 预览用表面色：自定义背景色 > 主题背景色 > ZCode 暗色默认
   const surfaceColor = cfg.bg_color || PREVIEW[cfg.theme ?? ""]?.bg || "#171717";
@@ -224,9 +229,28 @@ export default function Beautify() {
             ZCode 版本：<span className="za-mono">{zcodeVersion || "—"}</span>
           </span>
           <span className="za-faint">
-            原始备份：{hasBackup ? "已有" : "无（首次应用时创建）"}
+            原始备份：
+            {hasBackup
+              ? backupVersion
+                ? `已有（v${backupVersion}）`
+                : "已有（版本未知）"
+              : "无（首次应用时创建）"}
           </span>
         </div>
+        {backupStale && (
+          <p
+            style={{
+              margin: "10px 0 0",
+              fontSize: "var(--fs-sm)",
+              color: "var(--warning)",
+            }}
+          >
+            备份属于 ZCode v{backupVersion}，与当前 v{zcodeVersion} 不一致：
+            {installed
+              ? "当前已注入且没有该版本官方包，无法安全还原；如需还原请先重装/修复 ZCode。"
+              : "下次「应用美化」会用当前官方包自动重建备份。"}
+          </p>
+        )}
         {asarPath && (
           <div
             className="za-faint za-mono"
@@ -239,9 +263,15 @@ export default function Beautify() {
         <div className="za-row" style={{ gap: 8, marginTop: 14 }}>
           <button
             className="za-btn za-btn-sm"
-            disabled={busyNow || !hasBackup}
+            disabled={busyNow || !hasBackup || backupStale}
             onClick={restore}
-            title={hasBackup ? "用备份恢复官方 app.asar" : "尚无备份"}
+            title={
+              backupStale
+                ? "备份版本与当前 ZCode 不一致，还原会把旧文件盖到新版本上，已禁止"
+                : hasBackup
+                  ? "用备份恢复官方 app.asar"
+                  : "尚无备份"
+            }
           >
             {busy === "restore" ? "还原中…" : "还原官方外观"}
           </button>
@@ -487,7 +517,7 @@ export default function Beautify() {
             onClick={apply}
           >
             <IconSparkle width={15} height={15} />
-            {busy === "apply" ? "正在打包 app.asar…" : installed ? "重新应用美化" : "应用美化"}
+            {busy === "apply" ? "正在写入 app.asar…" : installed ? "重新应用美化" : "应用美化"}
           </button>
           {busyNow && (
             <span className="za-faint" style={{ fontSize: "var(--fs-sm)" }}>

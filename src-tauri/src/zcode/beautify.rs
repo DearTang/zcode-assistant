@@ -1,4 +1,5 @@
-//! ZCode 美化：根据配置生成 zcode-custom.css 并注入解包后的 index.html。
+//! ZCode 美化：根据配置生成 zcode-custom.css，并以 asar 原地补丁方式注入
+//! app.asar 内的 index.html（不解包、不整包重打包，详见 asar::patch）。
 //!
 //! 注入策略（最小侵入、最易还原）：在 `out/renderer/index.html` 的 `</head>` 前
 //! 插入 `<link rel="stylesheet" href="./assets/zcode-custom.css">`，并把自定义 CSS
@@ -40,9 +41,11 @@ use std::fs;
 use std::path::Path;
 
 const INDEX_HTML: &str = "out/renderer/index.html";
+const ASSETS_DIR: &str = "out/renderer/assets";
 const CUSTOM_CSS_NAME: &str = "zcode-custom.css";
 const CUSTOM_JS_NAME: &str = "zcode-custom.js";
 const INJECT_MARK: &str = "zcode-custom.css"; // 用于判断是否已注入
+const BG_ASSET_PREFIX: &str = "zcode-bg."; // 背景图在 assets/ 内的文件名前缀
 
 /// 美化配置。持久化到 zcode-assistant app data，不写 ZCode 的 setting.json。
 #[derive(Serialize, Deserialize, Clone)]
@@ -632,51 +635,25 @@ fn patcher_js() -> &'static str {
 
 // ───────────────────────── 注入 ─────────────────────────
 
-/// 判断解包目录的 index.html 是否已注入自定义 CSS link。
-#[allow(dead_code)]
-pub fn is_injected(extracted_dir: &Path) -> bool {
-    fs::read_to_string(extracted_dir.join(INDEX_HTML))
-        .map(|s| s.contains(INJECT_MARK))
+/// 当前 app.asar 是否已注入美化（index.html 含注入标记）。
+pub fn is_installed(asar: &Path) -> bool {
+    asar::read_file(asar, INDEX_HTML)
+        .map(|b| String::from_utf8_lossy(&b).contains(INJECT_MARK))
         .unwrap_or(false)
 }
 
-/// 把 css_content 写入 assets/zcode-custom.css、运行时补丁写入
-/// assets/zcode-custom.js，并在 index.html 的 </head> 前注入 link + script。
-/// 若提供 bg_image_src，则把图片复制为 assets/zcode-bg.<ext>（先清掉旧背景图）。
+/// 在 index.html 的 </head> 前插入 CSS link 与 JS script 标签。
 /// 幂等：两个标签分别判断是否已存在，只补缺失的那个——因此对「已注入过 CSS
-/// 的旧版 asar」也能原地升级补上 script 标签（文件内容每次都重写）。
-pub fn inject(extracted_dir: &Path, css_content: &str, bg_image_src: Option<&Path>) -> Result<()> {
-    let assets_dir = extracted_dir.join("out/renderer/assets");
-    fs::create_dir_all(&assets_dir)?;
-    fs::write(assets_dir.join(CUSTOM_CSS_NAME), css_content)?;
-    // JS 内容为常量且自带开关（无 --zq-alpha 时空转），无条件写入无害
-    fs::write(assets_dir.join(CUSTOM_JS_NAME), patcher_js())?;
-
-    // 清理上一次注入的背景图，避免配置移除后残留
-    if let Ok(entries) = fs::read_dir(&assets_dir) {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with("zcode-bg.") {
-                let _ = fs::remove_file(e.path());
-            }
-        }
-    }
-    if let Some(src) = bg_image_src {
-        let asset = validate_bg_image(src)?;
-        fs::copy(src, assets_dir.join(&asset))
-            .with_context(|| format!("复制背景图失败：{}", src.display()))?;
-    }
-
+/// 的旧版 asar」也能原地升级补上 script 标签。
+fn inject_html(html: &str) -> Result<String> {
     let css_link = format!(
         "    <link rel=\"stylesheet\" href=\"./assets/{CUSTOM_CSS_NAME}\">\n"
     );
     let js_tag = format!(
         "    <script defer src=\"./assets/{CUSTOM_JS_NAME}\"></script>\n"
     );
-    let html_path = extracted_dir.join(INDEX_HTML);
-    let html = fs::read_to_string(&html_path)
-        .with_context(|| format!("读取 {} 失败", INDEX_HTML))?;
     if html.contains(&css_link) && html.contains(&js_tag) {
-        return Ok(()); // 两个标签都在，仅更新了文件内容
+        return Ok(html.to_string()); // 两个标签都在
     }
     let Some(idx) = html.find("</head>") else {
         return Err(anyhow::anyhow!("index.html 未找到 </head> 注入锚点"));
@@ -691,8 +668,57 @@ pub fn inject(extracted_dir: &Path, css_content: &str, bg_image_src: Option<&Pat
         new_html.push_str(&js_tag);
     }
     new_html.push_str(after);
-    fs::write(&html_path, new_html)?;
-    Ok(())
+    Ok(new_html)
+}
+
+/// 在内存中构建 asar 原地补丁的修改集（不解包、不落盘）：
+/// - index.html 注入 link/script 标签；
+/// - 写 assets/zcode-custom.css 与 assets/zcode-custom.js（JS 内容为常量且自带
+///   开关——无 --zq-alpha 时空转，无条件写入无害）；
+/// - 背景图：先移除旧 zcode-bg.* 条目（避免配置移除后残留、换图后累积），
+///   再写入新的（若有）。
+fn build_mods(
+    asar: &Path,
+    css_content: &str,
+    bg_image_src: Option<&Path>,
+) -> Result<Vec<(String, asar::FileMod)>> {
+    let mut mods: Vec<(String, asar::FileMod)> = Vec::new();
+
+    let html = asar::read_file(asar, INDEX_HTML)
+        .with_context(|| format!("读取 {} 失败", INDEX_HTML))?;
+    let new_html = inject_html(&String::from_utf8_lossy(&html))?;
+    mods.push((
+        INDEX_HTML.to_string(),
+        asar::FileMod::Write(new_html.into_bytes()),
+    ));
+
+    mods.push((
+        format!("{ASSETS_DIR}/{CUSTOM_CSS_NAME}"),
+        asar::FileMod::Write(css_content.as_bytes().to_vec()),
+    ));
+    mods.push((
+        format!("{ASSETS_DIR}/{CUSTOM_JS_NAME}"),
+        asar::FileMod::Write(patcher_js().as_bytes().to_vec()),
+    ));
+
+    // 清理上一次注入的背景图（assets 目录不存在则跳过）
+    if let Ok(names) = asar::list_dir(asar, ASSETS_DIR) {
+        for name in names {
+            if name.starts_with(BG_ASSET_PREFIX) {
+                mods.push((format!("{ASSETS_DIR}/{name}"), asar::FileMod::Remove));
+            }
+        }
+    }
+    if let Some(src) = bg_image_src {
+        let asset = validate_bg_image(src)?;
+        let bytes =
+            fs::read(src).with_context(|| format!("读取背景图失败：{}", src.display()))?;
+        mods.push((
+            format!("{ASSETS_DIR}/{asset}"),
+            asar::FileMod::Write(bytes),
+        ));
+    }
+    Ok(mods)
 }
 
 // ───────────────────────── 配置持久化 ─────────────────────────
@@ -761,13 +787,15 @@ pub fn write_templates(list: &[BeautifyTemplate]) -> Result<()> {
 
 // ───────────────────────── 高层 apply / restore ─────────────────────────
 
-/// 完整应用美化：
-/// 备份（首次）→ kill ZCode 解锁 → extract → 注入 → pack → 原子替换 app.asar。
+/// 完整应用美化（快速路径）：
+/// 版本感知备份 → 内存构建修改集 → kill ZCode 解锁 → asar 原地补丁 → 原子替换。
+/// 不再整包解包/重打包：284MB 的 app.asar 只做一次顺序拷贝 + 少量哈希，秒级完成。
 /// 不负责重启 ZCode（由命令层 emit restart 事件，前端走全局 RestartDialog）。
 pub fn apply(cfg: &BeautifyConfig) -> Result<()> {
     // 0. 背景图预校验（在关闭 ZCode 之前尽早失败）
-    if let Some(p) = cfg.bg_image.as_deref() {
-        validate_bg_image(Path::new(p))?;
+    let bg_src = cfg.bg_image.as_deref().map(Path::new);
+    if let Some(p) = bg_src {
+        validate_bg_image(p)?;
     }
 
     let asar_path = asar::asar_path()?;
@@ -775,34 +803,20 @@ pub fn apply(cfg: &BeautifyConfig) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow::anyhow!("app.asar 无父目录"))?;
 
-    // 1. 首次备份原始 app.asar
-    asar::ensure_backup()?;
+    // 1. 版本感知备份（ZCode 升级后首次应用会用官方包自动重建）
+    ensure_backup_versioned()?;
 
-    // 2. 关闭 ZCode，释放 app.asar 文件锁
+    // 2. 构建修改集（读 asar 内 index.html + 生成 CSS/JS，全部在内存完成）
+    let mods = build_mods(&asar_path, &generate_css(cfg), bg_src)?;
+
+    // 3. 关闭 ZCode，释放 app.asar 文件锁（放在修改集构建之后，缩短停机窗口）
     let _ = process::kill_zcode();
 
-    // 3. 解包到临时目录
-    let work = std::env::temp_dir().join("zcode_beautify_apply");
-    if work.exists() {
-        let _ = fs::remove_dir_all(&work);
-    }
-    let extracted = work.join("extracted");
-    let unpacked = asar::extract(&asar_path, &extracted)?;
-
-    // 4. 注入 CSS + 背景图 + link
-    let bg_src = cfg.bg_image.as_deref().map(Path::new);
-    inject(&extracted, &generate_css(cfg), bg_src)?;
-
-    // 5. 重打包到同目录的临时文件（同卷，便于原子 rename）
+    // 4. 原地补丁到同目录临时文件（同卷，便于原子 rename）→ 原子替换
     let new_asar = resources_dir.join("app.asar.new");
-    asar::pack(&extracted, &new_asar, &unpacked)?;
-
-    // 6. 原子替换：rename 会覆盖目标（Windows MoveFileEx REPLACE_EXISTING）
+    asar::patch(&asar_path, &mods, &new_asar)?;
     fs::rename(&new_asar, &asar_path)
         .with_context(|| "替换 app.asar 失败（可能 ZCode 仍在运行占用文件）")?;
-
-    // 7. 清理临时目录
-    let _ = fs::remove_dir_all(&work);
     Ok(())
 }
 
@@ -811,24 +825,62 @@ pub fn apply(cfg: &BeautifyConfig) -> Result<()> {
 pub fn apply_test_css() -> Result<()> {
     let asar_path = asar::asar_path()?;
     let resources_dir = asar_path.parent().unwrap();
-    asar::ensure_backup()?;
+    ensure_backup_versioned()?;
+    let mods = build_mods(&asar_path, test_css(), None)?;
     let _ = process::kill_zcode();
-    let work = std::env::temp_dir().join("zcode_beautify_apply");
-    if work.exists() {
-        let _ = fs::remove_dir_all(&work);
-    }
-    let extracted = work.join("extracted");
-    let unpacked = asar::extract(&asar_path, &extracted)?;
-    inject(&extracted, test_css(), None)?;
     let new_asar = resources_dir.join("app.asar.new");
-    asar::pack(&extracted, &new_asar, &unpacked)?;
+    asar::patch(&asar_path, &mods, &new_asar)?;
     fs::rename(&new_asar, &asar_path)?;
-    let _ = fs::remove_dir_all(&work);
     Ok(())
 }
 
-/// 还原：kill ZCode → 用备份覆盖 app.asar。
+/// 原始备份对应的 ZCode 版本（读备份 asar 的 package.json）。
+/// 无备份或备份损坏读不出均为 None（状态层配合 has_backup 区分展示）。
+pub fn backup_version() -> Option<String> {
+    let p = asar::origin_backup_path().ok()?;
+    if !p.exists() {
+        return None;
+    }
+    asar::read_zcode_version(&p)
+}
+
+/// 版本感知备份（apply 前调用，此时 app.asar 尚未被本次注入）：
+/// - 无备份 → 备份当前 app.asar；
+/// - 备份版本与当前一致 → 跳过；
+/// - 版本不一致（ZCode 升级替换了 app.asar）且当前未注入（新版本官方纯净包）
+///   → 用当前包重建备份。升级后第一次「应用美化」自动完成备份换新；
+/// - 版本不一致但当前已注入（历史遗留：升级后注入过、备份没跟上）→ 无法安全
+///   重建（当前非纯净包），保留旧备份；还原由 restore 的版本防护拦下。
+fn ensure_backup_versioned() -> Result<()> {
+    let src = asar::asar_path()?;
+    if asar::ensure_backup()? {
+        return Ok(()); // 本次新建了备份（必然取自当前包）
+    }
+    let cur = asar::read_zcode_version(&src);
+    let bak = backup_version();
+    if cur.is_some() && cur != bak && !is_installed(&src) {
+        let origin = asar::origin_backup_path()?;
+        fs::copy(&src, &origin).with_context(|| {
+            format!("重建备份失败: {} -> {}", src.display(), origin.display())
+        })?;
+    }
+    Ok(())
+}
+
+/// 还原：备份版本与当前安装一致才放行（防止旧版本 asar 覆盖新版本安装、
+/// 导致 ZCode 主程序与渲染层版本错配而损坏）→ kill ZCode → 备份覆盖 app.asar。
 pub fn restore() -> Result<()> {
+    let src = asar::asar_path()?;
+    let cur = asar::read_zcode_version(&src);
+    let bak = backup_version();
+    if let (Some(c), Some(b)) = (&cur, &bak) {
+        if c != b {
+            anyhow::bail!(
+                "原始备份属于 ZCode v{b}，与当前安装的 v{c} 不一致：还原会把旧版本文件覆盖到新版本上，可能导致 ZCode 无法启动。\
+                 请先重装/修复 ZCode 恢复官方文件，再重新应用美化（会自动重建匹配版本的备份）。"
+            );
+        }
+    }
     let _ = process::kill_zcode();
     asar::restore_from_backup()?;
     Ok(())
@@ -838,40 +890,53 @@ pub fn restore() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// 离线验证 inject() 全链路（不触碰真实 app.asar）：
-    /// CSS/JS 写入、背景图复制、旧背景图清理、link + script 注入、幂等与
+    /// 离线验证 build_mods + patch 全链路（合成 asar，不触碰真实 ZCode）：
+    /// CSS/JS 写入、背景图替换、旧背景图清理、link + script 注入、幂等与
     /// 「已注入过 CSS 的旧版 asar」升级补 script。
     #[test]
-    fn inject_offline_with_bg_image() {
-        let work = std::env::temp_dir().join("zcode_beautify_inject_test");
+    fn build_mods_and_patch_offline() {
+        let work = std::env::temp_dir().join("zcode_beautify_patch_test");
         let _ = fs::remove_dir_all(&work);
-        let extracted = work.join("extracted");
-        let assets = extracted.join("out/renderer/assets");
-        fs::create_dir_all(&assets).unwrap();
+
+        // 合成 asar：index.html + assets（含上一次注入遗留的旧背景图 zcode-bg.jpg）
+        let src_dir = work.join("src");
+        fs::create_dir_all(src_dir.join(ASSETS_DIR)).unwrap();
         fs::write(
-            extracted.join("out/renderer/index.html"),
+            src_dir.join(INDEX_HTML),
             "<!doctype html><html><head><title>ZCode</title></head><body><div id=\"root\"></div></body></html>",
         )
         .unwrap();
+        fs::write(src_dir.join(ASSETS_DIR).join("zcode-bg.jpg"), b"old").unwrap();
+        fs::write(src_dir.join(ASSETS_DIR).join("styles-abc.css"), b"").unwrap();
+        let asar = work.join("app.asar");
+        asar::pack(&src_dir, &asar, &std::collections::HashSet::new()).unwrap();
 
-        // 模拟背景图源文件与上一次注入遗留的旧背景图
+        // 模拟背景图源文件
         let img_src = work.join("wallpaper.png");
         fs::write(&img_src, b"\x89PNG fake bytes").unwrap();
-        fs::write(assets.join("zcode-bg.jpg"), b"old").unwrap();
 
-        inject(&extracted, "/* test css */", Some(img_src.as_path())).unwrap();
+        let mods = build_mods(&asar, "/* test css */", Some(img_src.as_path())).unwrap();
+        let patched = work.join("patched.asar");
+        asar::patch(&asar, &mods, &patched).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(assets.join(CUSTOM_CSS_NAME)).unwrap(),
-            "/* test css */"
-        );
+        let read = |p: &str, a: &std::path::Path| {
+            String::from_utf8_lossy(&asar::read_file(a, p).unwrap()).to_string()
+        };
+        assert_eq!(read("out/renderer/assets/zcode-custom.css", &patched), "/* test css */");
         assert!(
-            assets.join(CUSTOM_JS_NAME).exists(),
+            asar::read_file(&patched, "out/renderer/assets/zcode-custom.js").is_ok(),
             "运行时补丁脚本未写入"
         );
-        assert!(assets.join("zcode-bg.png").exists(), "背景图未按源扩展名复制");
-        assert!(!assets.join("zcode-bg.jpg").exists(), "旧背景图未清理");
-        let html = fs::read_to_string(extracted.join(INDEX_HTML)).unwrap();
+        assert_eq!(
+            asar::read_file(&patched, "out/renderer/assets/zcode-bg.png").unwrap(),
+            b"\x89PNG fake bytes".to_vec(),
+            "背景图未按源扩展名写入"
+        );
+        assert!(
+            asar::read_file(&patched, "out/renderer/assets/zcode-bg.jpg").is_err(),
+            "旧背景图条目未清理"
+        );
+        let html = read(INDEX_HTML, &patched);
         assert!(html.contains(r#"<link rel="stylesheet" href="./assets/zcode-custom.css">"#));
         assert!(
             html.contains(r#"<script defer src="./assets/zcode-custom.js"></script>"#),
@@ -882,20 +947,40 @@ mod tests {
             "link 未注入到 </head> 之前"
         );
 
-        // 幂等 + 移除背景图场景：link/script 均不重复插入，旧背景图被清掉
-        inject(&extracted, "/* test css 2 */", None).unwrap();
-        let html = fs::read_to_string(extracted.join(INDEX_HTML)).unwrap();
+        // 幂等 + 移除背景图场景：对已 patch 的包再次构建（无背景图）
+        let mods2 = build_mods(&patched, "/* test css 2 */", None).unwrap();
+        let patched2 = work.join("patched2.asar");
+        asar::patch(&patched, &mods2, &patched2).unwrap();
+        let html = read(INDEX_HTML, &patched2);
         assert_eq!(html.matches("zcode-custom.css").count(), 1, "link 重复注入");
         assert_eq!(html.matches("zcode-custom.js").count(), 1, "script 重复注入");
-        assert!(!assets.join("zcode-bg.png").exists(), "移除背景图后未清理");
+        assert!(
+            asar::read_file(&patched2, "out/renderer/assets/zcode-bg.png").is_err(),
+            "移除背景图后未清理"
+        );
+        assert_eq!(
+            read("out/renderer/assets/zcode-custom.css", &patched2),
+            "/* test css 2 */"
+        );
 
-        // 升级路径：手工构造「只有 CSS link 的旧版 asar」，inject 应补上 script
+        // 升级路径：构造「只有 CSS link 的旧版 asar」，build_mods 应补上 script
         let old_html = html.replace(r#"<script defer src="./assets/zcode-custom.js"></script>"#, "");
-        fs::write(extracted.join(INDEX_HTML), old_html).unwrap();
-        inject(&extracted, "/* test css 3 */", None).unwrap();
-        let html = fs::read_to_string(extracted.join(INDEX_HTML)).unwrap();
+        let mods_old = vec![(
+            INDEX_HTML.to_string(),
+            asar::FileMod::Write(old_html.into_bytes()),
+        )];
+        let old_asar = work.join("old.asar");
+        asar::patch(&patched2, &mods_old, &old_asar).unwrap();
+        let mods3 = build_mods(&old_asar, "/* test css 3 */", None).unwrap();
+        let patched3 = work.join("patched3.asar");
+        asar::patch(&old_asar, &mods3, &patched3).unwrap();
+        let html = read(INDEX_HTML, &patched3);
         assert_eq!(html.matches("zcode-custom.css").count(), 1);
-        assert_eq!(html.matches("zcode-custom.js").count(), 1, "旧版 asar 未补上 script 标签");
+        assert_eq!(
+            html.matches("zcode-custom.js").count(),
+            1,
+            "旧版 asar 未补上 script 标签"
+        );
 
         let _ = fs::remove_dir_all(&work);
     }

@@ -378,7 +378,7 @@ export const beautify = {
   /** 读取背景图 base64 data URL 供预览（>8MB 或格式不支持返回 null） */
   readImagePreview: (path: string) =>
     invoke<string | null>("read_beautify_image_preview", { path }),
-  /** 应用美化（备份→注入→重打包→替换 app.asar），完成后后端会请求重启 zcode */
+  /** 应用美化（备份→原地补丁→替换 app.asar），完成后后端会请求重启 zcode */
   apply: (config: BeautifyConfig) =>
     invoke<void>("apply_beautify", { config }),
   /** 还原官方 app.asar，完成后后端会请求重启 zcode */

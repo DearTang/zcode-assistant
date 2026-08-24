@@ -4,9 +4,6 @@ use crate::zcode::{asar, beautify, beautify::BeautifyConfig, beautify::BeautifyT
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-const INDEX_HTML_PATH: &str = "out/renderer/index.html";
-const INJECT_MARK: &str = "zcode-custom.css";
-
 /// 美化状态：是否已注入 / 是否有备份 / 当前配置 / ZCode 版本。
 #[derive(Serialize)]
 pub struct BeautifyStatus {
@@ -18,29 +15,33 @@ pub struct BeautifyStatus {
     pub config: BeautifyConfig,
     /// ZCode 版本号（asar 根 package.json）。
     pub zcode_version: Option<String>,
+    /// 原始备份对应的 ZCode 版本（读备份 asar 的 package.json；无备份为 None）。
+    /// 与 zcode_version 不一致 = 备份已过期（ZCode 升级后未重建）。
+    pub backup_version: Option<String>,
     /// app.asar 绝对路径（展示用）。
     pub asar_path: Option<String>,
 }
 
-/// 读取美化状态。async：要解包读 asar 内文件（美化页挂载即调），避免阻塞主线程。
+/// 读取美化状态。async：要读 asar 内文件（美化页挂载即调），避免阻塞主线程。
 #[tauri::command]
 pub async fn get_beautify_status() -> Result<BeautifyStatus, String> {
     let asar_path = asar::asar_path().ok();
     let installed = asar_path
         .as_ref()
-        .and_then(|p| asar::read_file(p, INDEX_HTML_PATH).ok())
-        .map(|b| String::from_utf8_lossy(&b).contains(INJECT_MARK))
+        .map(|p| beautify::is_installed(p))
         .unwrap_or(false);
     let has_backup = asar::origin_backup_path()
         .map(|p| p.exists())
         .unwrap_or(false);
     let config = beautify::read_config().unwrap_or_default();
     let zcode_version = asar_path.as_ref().and_then(|p| asar::read_zcode_version(p));
+    let backup_version = beautify::backup_version();
     Ok(BeautifyStatus {
         installed,
         has_backup,
         config,
         zcode_version,
+        backup_version,
         asar_path: asar_path.map(|p| p.display().to_string()),
     })
 }
@@ -100,8 +101,8 @@ pub async fn read_beautify_image_preview(path: String) -> Option<String> {
     ))
 }
 
-/// 应用美化：写配置 → 备份 → kill → extract → 注入 → pack → 替换 app.asar → 请求重启。
-/// async：asar 备份/解包/重打包为重 IO 操作（秒级），同步执行会长时间冻结主线程。
+/// 应用美化：写配置 → 备份（版本感知）→ kill → 原地补丁 app.asar → 替换 → 请求重启。
+/// async：asar 拷贝/补丁为重 IO 操作，避免长时间冻结主线程。
 #[tauri::command]
 pub async fn apply_beautify(app: AppHandle, config: BeautifyConfig) -> Result<(), String> {
     beautify::write_config(&config).map_err(|e| e.to_string())?;

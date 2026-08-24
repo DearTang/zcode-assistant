@@ -19,13 +19,20 @@
 //!
 //! 完整性校验已确认关闭（Electron FUSE[4]=off，exe 内无 ElectronAsarIntegrity），
 //! 重打包后 ZCode 能正常启动、不破坏 exe 签名。
+//!
+//! 两条改造路径：
+//! - `extract` + `pack`：全量解包/重打包（离线验证用）。对 284MB 的真实包意味着
+//!   几千个小文件的读写删 + 全量 SHA256，秒级到分钟级。
+//! - `patch`：原地补丁（apply 实际走的快速路径）。只改 JSON 头里被触及的条目，
+//!   新内容追加到 payload 尾部，原 payload 字节顺序照抄——一次顺序拷贝搞定。
 use crate::zcode::paths;
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::collections::HashSet;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 const BLOCK_SIZE: usize = 4 * 1024 * 1024;
@@ -61,12 +68,13 @@ pub fn origin_backup_path() -> Result<PathBuf> {
     Ok(backup_dir()?.join("app.asar.origin"))
 }
 
-// ───────────────────────── 解包 ─────────────────────────
+// ───────────────────────── 解包（离线验证 / 测试用）─────────────────────────
 
 /// 把 app.asar 解包到 dest 目录。返回 unpacked 文件的相对路径集合（正斜杠分隔）。
 ///
 /// - packed 文件：按 offset 从 asar payload 流式读出。
 /// - unpacked 文件：从 app.asar.unpacked 目录复制（其内容不在 asar 内）。
+#[cfg(test)]
 pub fn extract(asar: &Path, dest: &Path) -> Result<HashSet<String>> {
     fs::create_dir_all(dest).with_context(|| format!("创建解包目录失败: {}", dest.display()))?;
     let unpacked_root = asar
@@ -160,6 +168,139 @@ pub fn read_zcode_version(asar: &Path) -> Option<String> {
     v.get("version").and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
+/// 列出 asar 内某目录下的直接子项名（文件与子目录）。目录不存在返回 Err。
+pub fn list_dir(asar: &Path, inner_dir: &str) -> Result<Vec<String>> {
+    let mut f = fs::File::open(asar)?;
+    let (tree, _) = read_header(&mut f)?;
+    let node = navigate(&tree, inner_dir)
+        .ok_or_else(|| anyhow!("asar 内未找到目录 {}", inner_dir))?;
+    let files = node
+        .get("files")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow!("asar 内 {} 不是目录", inner_dir))?;
+    Ok(files.keys().cloned().collect())
+}
+
+/// navigate 的可变版本（用于就地修改 JSON 头条目）。
+fn navigate_mut<'a>(tree: &'a mut Value, inner_path: &str) -> Option<&'a mut Value> {
+    let mut cur = tree;
+    for part in inner_path.split('/') {
+        cur = cur.get_mut("files")?.get_mut(part)?;
+    }
+    Some(cur)
+}
+
+/// 从 JSON 头树中删除一个文件条目（目录节点，含最后一段）下的键。不存在则无操作。
+fn remove_entry(tree: &mut Value, inner_path: &str) {
+    let parts: Vec<&str> = inner_path.split('/').collect();
+    let (dirs, name) = parts.split_at(parts.len() - 1);
+    let mut cur = tree;
+    for p in dirs {
+        cur = match cur.get_mut("files").and_then(|f| f.get_mut(*p)) {
+            Some(c) => c,
+            None => return,
+        };
+    }
+    if let Some(files) = cur.get_mut("files").and_then(|v| v.as_object_mut()) {
+        files.remove(name[0]);
+    }
+}
+
+// ───────────────────────── 原地补丁（快速路径）─────────────────────────
+
+/// 单个 asar 内部文件的修改：写入/替换内容，或删除条目。
+#[derive(Clone)]
+pub enum FileMod {
+    /// 替换或新增文件（内容追加到 payload 尾部，原条目指向新位置）。
+    Write(Vec<u8>),
+    /// 删除条目（原字节留在 payload 中成为无引用死空间，无害）。
+    Remove,
+}
+
+/// 就地补丁 asar：不解包、不整包重打包，只替换 / 新增 / 删除少量内部文件。
+///
+/// 原理：JSON 头里的 offset 是相对 payload 起点的**相对偏移**。未修改条目的
+/// offset/integrity 原样保留，原 payload 字节顺序照抄（相对偏移不变即有效）；
+/// 被替换 / 新增文件的内容追加到 payload 尾部，条目改指新位置；被替换文件的旧
+/// 字节成为无引用死空间（每次 apply 累积几十 KB，无害；还原永远从备份恢复）。
+/// IO 从「全量解包 + 全量重打包」降为一次顺序拷贝 + 少量哈希。
+pub fn patch(asar: &Path, mods: &[(String, FileMod)], out: &Path) -> Result<()> {
+    let mut src =
+        fs::File::open(asar).with_context(|| format!("打开 asar 失败: {}", asar.display()))?;
+    let file_len = src.metadata()?.len();
+    let (mut tree, payload_base) = read_header(&mut src)?;
+    let old_payload_len = file_len
+        .checked_sub(payload_base)
+        .ok_or_else(|| anyhow!("asar 头长度异常：payload 起点超过文件长度"))?;
+
+    let mut append_offset: u64 = old_payload_len;
+    let mut appended: Vec<u8> = Vec::new();
+    for (inner_path, m) in mods {
+        let FileMod::Write(data) = m else {
+            remove_entry(&mut tree, inner_path);
+            continue;
+        };
+        let size = data.len() as u64;
+        let (hash, blocks) = sha256_and_blocks(data);
+        let integrity = integrity_json(&hash, &blocks);
+        let offset_str = append_offset.to_string();
+        append_offset += size;
+        appended.extend_from_slice(data);
+
+        if let Some(node) = navigate(&tree, inner_path) {
+            if node.get("files").is_some() {
+                return Err(anyhow!("asar 内 {} 是目录，无法写入文件", inner_path));
+            }
+            // 已有条目：只改 size/offset/integrity，executable 等其他字段原样保留
+            let obj = navigate_mut(&mut tree, inner_path)
+                .and_then(|n| n.as_object_mut())
+                .expect("navigate/navigate_mut 结果不一致");
+            obj.remove("unpacked");
+            obj.insert("size".to_string(), Value::from(size));
+            obj.insert("offset".to_string(), Value::String(offset_str));
+            obj.insert("integrity".to_string(), integrity);
+        } else {
+            // 新文件：沿路径创建目录节点后插入叶子
+            let root_files = tree
+                .get_mut("files")
+                .and_then(|v| v.as_object_mut())
+                .ok_or_else(|| anyhow!("asar JSON 头缺少 files 字段"))?;
+            let mut entry = Map::new();
+            entry.insert("size".to_string(), Value::from(size));
+            entry.insert("offset".to_string(), Value::String(offset_str));
+            entry.insert("integrity".to_string(), integrity);
+            insert_leaf(root_files, inner_path, Value::Object(entry));
+        }
+    }
+
+    // 头部序列化 + 对齐（与 pack 一致；serde_json 开了 preserve_order，键序不变）
+    let json_bytes = serde_json::to_vec(&tree).context("序列化 asar JSON 头失败")?;
+    let json_size = json_bytes.len() as u32;
+    let pad = (4 - (json_size % 4)) % 4;
+    let aligned = json_size + pad;
+
+    let mut out_f = BufWriter::with_capacity(
+        4 * 1024 * 1024,
+        fs::File::create(out).with_context(|| format!("创建输出失败: {}", out.display()))?,
+    );
+    out_f.write_all(&4u32.to_le_bytes())?; // 头大小标记
+    out_f.write_all(&((aligned + 8) as u32).to_le_bytes())?;
+    out_f.write_all(&((aligned + 4) as u32).to_le_bytes())?;
+    out_f.write_all(&json_size.to_le_bytes())?;
+    out_f.write_all(&json_bytes)?;
+    if pad > 0 {
+        out_f.write_all(&vec![0u8; pad as usize])?;
+    }
+    // 原 payload 原样照抄（未修改文件的字节与相对偏移全部保持不变）
+    src.seek(SeekFrom::Start(payload_base))?;
+    std::io::copy(&mut src.take(old_payload_len), &mut out_f)?;
+    // 追加区：本次写入/替换的文件内容
+    out_f.write_all(&appended)?;
+    out_f.flush()?;
+    Ok(())
+}
+
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn extract_dir(
     src: &mut fs::File,
@@ -216,6 +357,7 @@ fn extract_dir(
 }
 
 /// 从 src 流式复制 size 字节到 dest 文件。
+#[cfg(test)]
 fn copy_n(src: &mut fs::File, dest_path: &Path, size: u64) -> Result<()> {
     let mut out = fs::File::create(dest_path)?;
     let mut remaining = size;
@@ -232,13 +374,14 @@ fn copy_n(src: &mut fs::File, dest_path: &Path, size: u64) -> Result<()> {
     Ok(())
 }
 
-// ───────────────────────── 重打包 ─────────────────────────
+// ───────────────────────── 重打包（离线验证 / 测试用）─────────────────────────
 
 /// 把 src 目录重打包为 asar。unpacked_set 中的相对路径文件会被标记为 unpacked
 /// （不写入 payload，内容由 app.asar.unpacked 目录提供）。
 ///
 /// 两遍处理：第一遍算每个文件的 SHA256 + 块哈希、分配 offset、构建 JSON 头；
 /// 第二遍按顺序把 packed 文件内容流式写入 payload。
+#[cfg(test)]
 pub fn pack(src: &Path, out: &Path, unpacked_set: &HashSet<String>) -> Result<()> {
     // 1. 收集全部文件（相对路径 + 绝对路径），排序保证可重现
     let mut entries: Vec<(String, PathBuf)> = Vec::new();
@@ -295,6 +438,7 @@ pub fn pack(src: &Path, out: &Path, unpacked_set: &HashSet<String>) -> Result<()
 }
 
 /// 递归收集目录下所有文件，rel 为相对 src 的正斜杠路径。
+#[cfg(test)]
 fn walk_collect(base: &Path, rel: &Path, out: &mut Vec<(String, PathBuf)>) -> Result<()> {
     let dir = if rel.as_os_str().is_empty() {
         base.to_path_buf()
@@ -408,6 +552,164 @@ pub fn restore_from_backup() -> Result<()> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// patch 单测（合成小 asar，不依赖 ZCode）：
+    /// 替换/新增/删除条目 → read_file 校验内容、未修改文件保持不变、
+    /// 对已 patch 的包二次 patch（模拟重复应用）、unpacked 标记保留。
+    #[test]
+    fn patch_write_add_remove() {
+        let work = std::env::temp_dir().join("zcode_asar_patch_test");
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+
+        // 构造源目录：index.html + assets + package.json + unpacked native 模块
+        let src_dir = work.join("src");
+        fs::create_dir_all(src_dir.join("out/renderer/assets")).unwrap();
+        fs::create_dir_all(src_dir.join("node_modules/pty")).unwrap();
+        fs::write(
+            src_dir.join("out/renderer/index.html"),
+            b"<html><head></head><body>hi</body></html>",
+        )
+        .unwrap();
+        fs::write(src_dir.join("out/renderer/assets/a.css"), b"body{}").unwrap();
+        fs::write(src_dir.join("package.json"), br#"{"version":"9.9.9"}"#).unwrap();
+        fs::write(src_dir.join("node_modules/pty/pty.node"), b"\0binary").unwrap();
+
+        let mut unpacked_set = HashSet::new();
+        unpacked_set.insert("node_modules/pty/pty.node".to_string());
+        let asar = work.join("app.asar");
+        pack(&src_dir, &asar, &unpacked_set).unwrap();
+
+        // patch：替换 index.html、新增 js、删除 a.css
+        let mods = vec![
+            (
+                "out/renderer/index.html".to_string(),
+                FileMod::Write(b"<html><head><link></head><body>new</body></html>".to_vec()),
+            ),
+            (
+                "out/renderer/assets/zcode-custom.js".to_string(),
+                FileMod::Write(b"// js".to_vec()),
+            ),
+            ("out/renderer/assets/a.css".to_string(), FileMod::Remove),
+        ];
+        let patched = work.join("patched.asar");
+        patch(&asar, &mods, &patched).unwrap();
+
+        assert_eq!(
+            read_file(&patched, "out/renderer/index.html").unwrap(),
+            b"<html><head><link></head><body>new</body></html>"
+        );
+        assert_eq!(
+            read_file(&patched, "out/renderer/assets/zcode-custom.js").unwrap(),
+            b"// js"
+        );
+        assert!(
+            read_file(&patched, "out/renderer/assets/a.css").is_err(),
+            "已删除的条目不应再可读"
+        );
+        assert_eq!(
+            read_file(&patched, "package.json").unwrap(),
+            br#"{"version":"9.9.9"}"#,
+            "未修改文件内容应保持不变"
+        );
+        assert_eq!(
+            read_zcode_version(&patched).as_deref(),
+            Some("9.9.9"),
+            "版本探测应继续工作"
+        );
+
+        // 二次 patch（模拟重复应用）：对已补丁过的包再做增量修改
+        let mods2 = vec![(
+            "out/renderer/assets/zcode-custom.js".to_string(),
+            FileMod::Write(b"// js v2".to_vec()),
+        )];
+        let patched2 = work.join("patched2.asar");
+        patch(&patched, &mods2, &patched2).unwrap();
+        assert_eq!(
+            read_file(&patched2, "out/renderer/assets/zcode-custom.js").unwrap(),
+            b"// js v2"
+        );
+        assert_eq!(
+            read_file(&patched2, "out/renderer/index.html").unwrap(),
+            b"<html><head><link></head><body>new</body></html>",
+            "二次 patch 不应影响前次修改"
+        );
+
+        // unpacked 标记在 patch 后保留：extract 需要 app.asar.unpacked 同级目录
+        let unpacked_dir = work.join("app.asar.unpacked");
+        fs::create_dir_all(unpacked_dir.join("node_modules/pty")).unwrap();
+        fs::write(
+            unpacked_dir.join("node_modules/pty/pty.node"),
+            b"\0binary",
+        )
+        .unwrap();
+        let dir_out = work.join("extracted");
+        let unp = extract(&patched2, &dir_out).unwrap();
+        assert!(
+            unp.contains("node_modules/pty/pty.node"),
+            "unpacked 标记丢失，native 模块会被错误打进 payload"
+        );
+        assert!(read_file(&patched2, "node_modules/pty/pty.node").is_ok());
+
+        // 新增深层路径（目录节点不存在时应自动创建）
+        let mods3 = vec![(
+            "out/renderer/assets/newdir/deep/file.txt".to_string(),
+            FileMod::Write(b"deep".to_vec()),
+        )];
+        let patched3 = work.join("patched3.asar");
+        patch(&patched2, &mods3, &patched3).unwrap();
+        assert_eq!(
+            read_file(&patched3, "out/renderer/assets/newdir/deep/file.txt").unwrap(),
+            b"deep"
+        );
+
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    /// 基准：对真实 app.asar 副本做 patch（替换 index.html + 新增 css/js），
+    /// 测量耗时并校验可读。全程在临时目录操作，绝不触碰真实 ZCode。
+    /// 手动跑：`cargo test -- --ignored patch_real_asar_bench --nocapture`
+    #[test]
+    #[ignore]
+    fn patch_real_asar_bench() {
+        let real = asar_path().expect("未找到 app.asar，无法验证");
+        let work = std::env::temp_dir().join("zcode_asar_patch_bench");
+        let _ = fs::remove_dir_all(&work);
+        fs::create_dir_all(&work).unwrap();
+        let copy = work.join("app.asar");
+        println!("复制 app.asar 副本...");
+        fs::copy(&real, &copy).expect("复制 app.asar 失败");
+
+        let mods = vec![
+            (
+                "out/renderer/index.html".to_string(),
+                FileMod::Write(b"<html><head></head><body></body></html>".to_vec()),
+            ),
+            (
+                "out/renderer/assets/zcode-custom.css".to_string(),
+                FileMod::Write(b"/* bench */".to_vec()),
+            ),
+            (
+                "out/renderer/assets/zcode-custom.js".to_string(),
+                FileMod::Write(b"// bench".to_vec()),
+            ),
+        ];
+        let out = work.join("patched.asar");
+        let t0 = std::time::Instant::now();
+        patch(&copy, &mods, &out).expect("patch 失败");
+        println!(
+            "patch 耗时 {:?}（{} -> {} 字节）",
+            t0.elapsed(),
+            fs::metadata(&copy).unwrap().len(),
+            fs::metadata(&out).unwrap().len()
+        );
+        assert!(read_file(&out, "package.json").is_ok(), "patch 后 asar 头损坏");
+        assert_eq!(
+            read_file(&out, "out/renderer/assets/zcode-custom.css").unwrap(),
+            b"/* bench */"
+        );
+        let _ = fs::remove_dir_all(&work);
+    }
 
     /// 调研用：把真实 app.asar 解包到 %TEMP%\zcode_research（只读原文件，绝不写回）。
     /// 手动跑：`cargo test -- --ignored dump_for_research`

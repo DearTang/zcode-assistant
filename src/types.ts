@@ -232,6 +232,8 @@ export interface BeautifyStatus {
   config: BeautifyConfig;
   /** ZCode 版本号 */
   zcode_version?: string;
+  /** 原始备份对应的 ZCode 版本；与 zcode_version 不一致 = 备份已过期（升级后未重建） */
+  backup_version?: string | null;
   /** app.asar 绝对路径 */
   asar_path?: string;
 }
