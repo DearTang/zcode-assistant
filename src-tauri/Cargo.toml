@@ -1,13 +1,15 @@
 [package]
 name = "zcode-assistant"
-version = "0.5.1"
+version = "0.6.0"
 description = "zcode 使用增强工具"
 authors = ["zcode-assistant"]
 edition = "2021"
 
 [lib]
 name = "zcode_assistant_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 桌面专用：staticlib/cdylib 是 Tauri 移动端（iOS/Android）所需，桌面构建用不到，
+# 每次打包却要额外产出两种全量产物（实测 lib 单元 333s 中占大头）。仅保留 rlib。
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -81,3 +83,8 @@ codegen-units = 1
 lto = true
 opt-level = "s"
 strip = true
+# 增量编译：重复打包只重编改动部分（缓存 target/release/incremental/）。
+# 收益：单 crate 重编的 lib 单元明显缩短；链接时间不受影响。
+# 产物：二进制大小 +0–1%、运行性能在 Tauri 桌面应用上完全无感、功能等价；
+# 仅放弃跨机器逐位可复现（发版场景无影响）。
+incremental = true

@@ -65,6 +65,7 @@ const blank = (): AutoSwitchRule => ({
   toModel: "",
   createdAt: "",
   projectDir: "",
+  switchPrimary: false,
 });
 
 /** 星期下拉多选（按钮 + 弹出 checkbox 面板） */
@@ -543,6 +544,15 @@ export default function AutoSwitch() {
                         {baseName(r.projectDir)}
                       </span>
                     )}
+                    {r.switchPrimary && (
+                      <span
+                        className="za-badge za-badge-neutral"
+                        title="切换时同步「模型管理」的主供应商标记到目标供应商"
+                        style={{ marginLeft: 4 }}
+                      >
+                        同步主供应
+                      </span>
+                    )}
                   </div>
                   <div
                     className="za-faint za-mono"
@@ -716,6 +726,31 @@ export default function AutoSwitch() {
                 ))}
               </select>
             </label>
+
+            {/* 主供应商联动（默认关）：切换时同步 zcode-assistant 的 ⭐ 主供应商标记到目标供应商 */}
+            <div
+              className="za-row"
+              style={{
+                gridColumn: "1 / -1",
+                gap: 8,
+                alignItems: "center",
+                fontSize: "var(--fs-sm)",
+                color: "var(--text-secondary)",
+              }}
+            >
+              <Switch
+                on={!!editing.switchPrimary}
+                onChange={(v) => setEditing({ ...editing, switchPrimary: v })}
+                title="开启后，规则切换时把模型管理里的主供应商也设为目标供应商"
+              />
+              <span>
+                同时切换主供应商
+                <span className="za-faint" style={{ marginLeft: 6 }}>
+                  （同步「模型管理」的 ⭐ 主供应商标记到目标供应商，总览 / 悬浮球 /
+                  托盘的配额展示跟随切换）
+                </span>
+              </span>
+            </div>
 
             {editing.kind === "cron" ? (
               <>

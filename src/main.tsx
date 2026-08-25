@@ -5,6 +5,7 @@ import App from "./App";
 import FloatBall from "./windows/FloatBall";
 import FloatPanel from "./windows/FloatPanel";
 import { ThemeProvider } from "./hooks/useTheme";
+import { AppearanceProvider } from "./hooks/useAppearance";
 import "./styles/tokens.css";
 import "./styles/global.css";
 import "./styles/components.css";
@@ -39,7 +40,10 @@ if (label === "float-ball") {
   root.render(
     <React.StrictMode>
       <ThemeProvider>
-        <App />
+        {/* 外观定制仅主窗口；悬浮球 / 悬浮面板小窗不套用 */}
+        <AppearanceProvider>
+          <App />
+        </AppearanceProvider>
       </ThemeProvider>
     </React.StrictMode>
   );

@@ -1,0 +1,4 @@
+# Windows MSVC 默认 link.exe 链接较慢（实测 bin 链接 ~213s）；换 Rust 自带的
+# rust-lld（lld-link 模式），链接通常快 2–4 倍。仅影响本机构建速度，不影响产物功能。
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

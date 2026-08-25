@@ -320,6 +320,8 @@ export interface AutoSwitchRule {
   createdAt: string;
   /** 项目目录（限定：仅该项目为最近对话项目时触发；留空=全部项目） */
   projectDir?: string;
+  /** 切换时同步 zcode-assistant 主供应商标记到目标供应商（总览/悬浮球/托盘配额跟随），默认关 */
+  switchPrimary?: boolean;
 }
 
 /** 自动切换可选项目（当前打开且有具体对话的项目） */

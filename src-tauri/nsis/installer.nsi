@@ -16,6 +16,10 @@
 ;      删除，卸载不再因此卡住或残留。zcode-assistant 常驻托盘 + 悬浮球，
 ;      升级/卸载时主程序可能未及时退出，/REBOOTOK 兜底这种情况。
 ;
+;   3. reinst_uninstall 调用旧版卸载器时始终追加 /UPDATE（官方仅 $UpdateMode=1
+;      才追加）：升级流程跑旧版卸载器时若非更新模式，会顺手删除 HKCU Run 的
+;      开机自启注册项与快捷方式，导致"升级后自启失效"。
+;
 ; 维护须知（接管模板的代价）:
 ;   升级 Tauri（如 2.12）后，若官方改动了 installer.nsi，需 re-sync --
 ;   diff 新官方模板与本副本，把上述 1~2 项改动重新应用到新模板对应位置。
@@ -372,7 +376,10 @@ Function PageLeaveReinstall
     ${Else}
       ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
       ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
-      ${IfThen} $UpdateMode = 1 ${|} StrCpy $R1 "$R1 /UPDATE" ${|} ; append /UPDATE
+      ; zcode 改动: 始终追加 /UPDATE——能走到本标签说明马上要装新版（升级/重装），
+      ; 旧版卸载器以更新模式执行才能保留 HKCU Run 开机自启项与快捷方式；
+      ; 官方原版仅在 $UpdateMode = 1 时追加，GUI 升级默认路径会静默清掉自启项。
+      StrCpy $R1 "$R1 /UPDATE"
       ${IfThen} $PassiveMode = 1 ${|} StrCpy $R1 "$R1 /P" ${|} ; append /P
       ; zcode 改动: 加 /S 让旧版卸载静默执行（官方原版只有 _?=$4，会弹卸载向导）
       StrCpy $R1 "$R1 /S _?=$4" ; append silent + uninstall directory

@@ -55,6 +55,10 @@ pub fn run() {
                 health: Mutex::new(None),
             });
 
+            // 开机自启自愈：升级流程可能清掉系统自启注册项（详见 prefs_cmd 注释），
+            // 在任何窗口显示前按 DB 偏好补注册，避免设置页查询时把偏好误同步为关
+            commands::prefs_cmd::reconcile_autostart(app.handle());
+
             // 主窗口显示
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.show();

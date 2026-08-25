@@ -230,6 +230,20 @@ fn mark_fired(db: &Database, rule_id: &str, start: Option<&str>, now: &DateTime<
     let _ = db.kv_set(&fired_key(rule_id, start, now), "1");
 }
 
+/// 规则开启「同时切换主供应商」时：把 zcode-assistant 自己的主供应商标记
+/// （provider_meta.is_primary）也切到规则目标供应商——总览 / 悬浮球 / 托盘的
+/// 配额展示随之跟随。非致命：失败只记日志，不影响 ZCode 侧切换流程。
+/// 放在 switch_provider 入口与 test_rule 的「无事可做」早退分支调用，
+/// 保证即使 ZCode 已在目标供应商、主供应商标记也会被同步。
+pub(crate) fn sync_primary_if_enabled(state: &AppState, rule: &AutoSwitchRule) {
+    if !rule.switch_primary {
+        return;
+    }
+    if let Err(e) = state.db.set_provider_primary(&rule.to_provider, true) {
+        log::warn!("autoswitch: 联动切换主供应商失败: {e}");
+    }
+}
+
 /// 执行切换（对全部符合条件的会话生效）：
 ///   1) 直写目标会话的模型选择（cli db 的 runtime/model_selection）：ZCode 会话
 ///      恢复时按该条目还原模型（免 UI 模拟的核心，setting.json 只决定新会话的
@@ -239,6 +253,7 @@ fn mark_fired(db: &Database, rule_id: &str, start: Option<&str>, now: &DateTime<
 ///      会话恢复时统一到达目标；关 → 不重启，各会话在恢复 / 新开时到达目标
 ///      （不做单会话键盘模拟——只点一个会话与其余会话状态不一致）。
 /// 完成后广播 model://switched 同步界面，并记录本次到达的目标（供跳过判断）。
+/// 规则开启 switch_primary 时，先联动切换 zcode-assistant 主供应商标记。
 pub(crate) fn switch_provider(
     app: &AppHandle,
     family: &str,
@@ -247,6 +262,9 @@ pub(crate) fn switch_provider(
     let state = app.state::<AppState>();
     let restart_mode =
         crate::commands::prefs_cmd::current_prefs(&state.db).switch_restart_zcode;
+
+    // 0) 主供应商标记联动（无论后续 ZCode 配置是否需要变动都执行）
+    sync_primary_if_enabled(&state, rule);
 
     // 收尾：广播「当前模型已切换」+ 记录本次到达的目标（供跳过判断）
     let finish = || {

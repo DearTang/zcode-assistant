@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS autoswitch_rules (
   time_start TEXT, time_end TEXT, weekdays TEXT,
   family TEXT, from_provider TEXT, to_provider TEXT,
   from_model TEXT, to_model TEXT, project_dir TEXT,
-  threshold REAL, priority INTEGER, created_at TEXT
+  threshold REAL, priority INTEGER, created_at TEXT,
+  switch_primary INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS provider_meta (
   provider_key TEXT PRIMARY KEY,
@@ -134,6 +135,16 @@ impl Database {
         }
         {
             let sql = "ALTER TABLE provider_meta ADD COLUMN is_primary INTEGER DEFAULT 0";
+            if let Err(e) = conn.execute_batch(sql) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(anyhow!("迁移失败: {msg}"));
+                }
+            }
+        }
+        {
+            // 自动切换规则「同时切换主供应商」开关
+            let sql = "ALTER TABLE autoswitch_rules ADD COLUMN switch_primary INTEGER DEFAULT 0";
             if let Err(e) = conn.execute_batch(sql) {
                 let msg = e.to_string();
                 if !msg.contains("duplicate column") {
@@ -314,7 +325,7 @@ impl Database {
     pub fn list_rules(&self) -> Result<Vec<AutoSwitchRule>> {
         let c = self.lock()?;
         let mut stmt = c.prepare(
-            "SELECT id,name,kind,enabled,time_start,time_end,weekdays,from_provider,from_model,to_provider,to_model,project_dir,threshold,priority,created_at FROM autoswitch_rules ORDER BY priority IS NULL, priority ASC, created_at ASC",
+            "SELECT id,name,kind,enabled,time_start,time_end,weekdays,from_provider,from_model,to_provider,to_model,project_dir,threshold,priority,created_at,switch_primary FROM autoswitch_rules ORDER BY priority IS NULL, priority ASC, created_at ASC",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(AutoSwitchRule {
@@ -333,6 +344,7 @@ impl Database {
                 threshold: r.get(12)?,
                 priority: r.get(13)?,
                 created_at: r.get(14)?,
+                switch_primary: r.get::<_, i64>(15)? != 0,
             })
         })?;
         let mut v = Vec::new();
@@ -345,15 +357,16 @@ impl Database {
     pub fn upsert_rule(&self, r: &AutoSwitchRule) -> Result<()> {
         let c = self.lock()?;
         c.execute(
-            "INSERT INTO autoswitch_rules(id,name,kind,enabled,time_start,time_end,weekdays,from_provider,from_model,to_provider,to_model,project_dir,threshold,priority,created_at)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)
+            "INSERT INTO autoswitch_rules(id,name,kind,enabled,time_start,time_end,weekdays,from_provider,from_model,to_provider,to_model,project_dir,threshold,priority,created_at,switch_primary)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)
              ON CONFLICT(id) DO UPDATE SET name=excluded.name,kind=excluded.kind,enabled=excluded.enabled,
              time_start=excluded.time_start,time_end=excluded.time_end,weekdays=excluded.weekdays,
              from_provider=excluded.from_provider,from_model=excluded.from_model,
              to_provider=excluded.to_provider,to_model=excluded.to_model,
              project_dir=excluded.project_dir,
-             threshold=excluded.threshold,priority=excluded.priority",
-            params![r.id, r.name, r.kind, r.enabled as i64, r.time_start, r.time_end, r.weekdays, r.from_provider, r.from_model, r.to_provider, r.to_model, r.project_dir, r.threshold, r.priority, r.created_at],
+             threshold=excluded.threshold,priority=excluded.priority,
+             switch_primary=excluded.switch_primary",
+            params![r.id, r.name, r.kind, r.enabled as i64, r.time_start, r.time_end, r.weekdays, r.from_provider, r.from_model, r.to_provider, r.to_model, r.project_dir, r.threshold, r.priority, r.created_at, r.switch_primary as i64],
         )?;
         Ok(())
     }

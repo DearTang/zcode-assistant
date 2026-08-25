@@ -1,14 +1,17 @@
-﻿import { useEffect, useState } from "react";
+﻿import { useEffect, useState, type CSSProperties } from "react";
 import { useTheme } from "../../hooks/useTheme";
+import { useAppearance } from "../../hooks/useAppearance";
 import { IconSun, IconMoon, IconCheck, IconRefresh } from "../../components/icons";
 import { UpdateNotification } from "../../components/UpdateNotification";
 import { Switch } from "../../components/Switch";
 import { toast } from "../../components/Toast";
-import { zcode, app, updater, prefs as prefsApi, events } from "../../api";
+import { zcode, app, updater, prefs as prefsApi, events, beautify } from "../../api";
 import type { AppPrefs, UpdateInfo, UsageDisplayMode } from "../../types";
 
 export default function Settings() {
   const { theme, setTheme } = useTheme();
+  const { appearance, setAppearance, reset: resetAppearance, bgDataUrl } =
+    useAppearance();
   const [probe, setProbe] = useState<{
     exePath: string | null;
     running: boolean;
@@ -68,6 +71,20 @@ export default function Settings() {
       toast.error(String(e));
       prefsApi.get().then(setPrefs).catch(() => {});
     }
+  };
+
+  // 外观定制：选背景图（复用美化页的文件选择器）；还原默认
+  const pickBgImage = async () => {
+    try {
+      const p = await beautify.pickImage();
+      if (p) setAppearance({ bgImage: p });
+    } catch (e: unknown) {
+      toast.error(String(e));
+    }
+  };
+  const resetAppearanceAll = () => {
+    resetAppearance();
+    toast.success("已还原默认主题");
   };
 
   const checkUpdates = async () => {
@@ -148,6 +165,98 @@ export default function Settings() {
             浅色
           </button>
         </div>
+      </div>
+
+      {/* 外观定制：主题色 / 透明度 / 背景图（参考「ZCode 美化」），即时生效 */}
+      <div className="za-panel za-card-pad">
+        <div className="za-section-title">
+          <h3>外观定制</h3>
+          <button className="za-btn za-btn-sm" onClick={resetAppearanceAll}>
+            还原默认主题
+          </button>
+        </div>
+        <p className="za-muted" style={{ margin: "0 0 12px" }}>
+          参考「ZCode 美化」的思路给本应用换肤：主题色更换强调色系，透明度让光晕 /
+          背景图更透出，背景图铺满窗口底层。全部即时生效，仅主窗口（悬浮球 / 托盘面板不套用）。
+        </p>
+
+        <div style={subLabel}>主题色</div>
+        <div className="za-row" style={{ gap: 14, flexWrap: "wrap", marginBottom: 6 }}>
+          {ACCENT_PRESETS.map((p) => (
+            <AccentChip
+              key={p.label}
+              label={p.label}
+              hue={p.hue}
+              selected={appearance.accentHue === p.hue}
+              onClick={() => setAppearance({ accentHue: p.hue })}
+            />
+          ))}
+        </div>
+        <div className="za-row" style={{ gap: 10, alignItems: "center" }}>
+          <input
+            type="range"
+            min={0}
+            max={360}
+            value={appearance.accentHue ?? 180}
+            onChange={(e) => setAppearance({ accentHue: Number(e.target.value) })}
+            style={{ flex: 1, accentColor: "var(--accent)", cursor: "pointer" }}
+            title="自定义色相（OKLCH hue）"
+          />
+          <span className="za-mono za-faint" style={{ width: 44, textAlign: "right" }}>
+            {appearance.accentHue ?? 180}°
+          </span>
+        </div>
+
+        <div style={{ ...subLabel, marginTop: 14 }}>透明度</div>
+        <Slider
+          value={Math.round(appearance.surfaceOpacity * 100)}
+          min={40}
+          max={100}
+          onChange={(v) => setAppearance({ surfaceOpacity: v / 100 })}
+        />
+        <div className="za-faint" style={{ fontSize: "var(--fs-xs)", marginTop: 2 }}>
+          面板与表面不透明度；调低让光晕 / 背景图更透出（100% = 默认实底）
+        </div>
+
+        <div style={{ ...subLabel, marginTop: 14 }}>背景图</div>
+        <div className="za-row" style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="za-btn za-btn-sm" onClick={pickBgImage}>
+            选择图片…
+          </button>
+          {appearance.bgImage && (
+            <button
+              className="za-btn za-btn-sm"
+              onClick={() => setAppearance({ bgImage: null })}
+            >
+              移除
+            </button>
+          )}
+          {appearance.bgImage && !bgDataUrl && (
+            <span className="za-faint" style={{ fontSize: "var(--fs-xs)" }}>
+              图片不可用（超过 8MB 或格式不支持）
+            </span>
+          )}
+        </div>
+        {bgDataUrl && (
+          <div style={{ marginTop: 8 }}>
+            <div
+              style={{
+                height: 84,
+                borderRadius: "var(--radius-md)",
+                border: "1px solid var(--glass-border)",
+                background: `url("${bgDataUrl}") center / cover no-repeat`,
+                opacity: appearance.bgOpacity,
+                marginBottom: 6,
+              }}
+            />
+            <Slider
+              value={Math.round(appearance.bgOpacity * 100)}
+              min={10}
+              max={100}
+              onChange={(v) => setAppearance({ bgOpacity: v / 100 })}
+            />
+          </div>
+        )}
       </div>
 
       <div className="za-panel za-card-pad">
@@ -316,6 +425,114 @@ function Row({ k, v }: { k: string; v: string }) {
       <span className="za-muted">{k}</span>
       <span className="za-mono" style={{ fontSize: "var(--fs-xs)" }}>
         {v}
+      </span>
+    </div>
+  );
+}
+
+/* ===== 外观定制局部组件 ===== */
+
+const subLabel: CSSProperties = {
+  fontSize: "var(--fs-sm)",
+  color: "var(--text-secondary)",
+  fontWeight: 500,
+  marginBottom: 6,
+};
+
+/** 主题色预设（OKLCH hue；null = 默认青绿，不覆盖任何 token） */
+const ACCENT_PRESETS: { label: string; hue: number | null }[] = [
+  { label: "青绿（默认）", hue: null },
+  { label: "蔚蓝", hue: 250 },
+  { label: "紫罗兰", hue: 300 },
+  { label: "品红", hue: 350 },
+  { label: "珊瑚", hue: 25 },
+  { label: "琥珀", hue: 75 },
+];
+
+function AccentChip({
+  label,
+  hue,
+  selected,
+  onClick,
+}: {
+  label: string;
+  hue: number | null;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const color = `oklch(0.68 0.15 ${hue ?? 180})`;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 4,
+        background: "transparent",
+        border: "none",
+        padding: 0,
+        cursor: "pointer",
+      }}
+    >
+      <span
+        style={{
+          width: 24,
+          height: 24,
+          borderRadius: "50%",
+          background: color,
+          display: "block",
+          boxShadow: selected
+            ? `0 0 0 2px var(--bg-base), 0 0 0 4px ${color}`
+            : undefined,
+        }}
+      />
+      <span
+        style={{
+          fontSize: "var(--fs-xs)",
+          color: selected ? "var(--text-primary)" : "var(--text-tertiary)",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </span>
+    </button>
+  );
+}
+
+function Slider({
+  value,
+  min,
+  max,
+  disabled,
+  onChange,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  disabled?: boolean;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div className="za-row" style={{ gap: 10, alignItems: "center" }}>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(Number(e.target.value))}
+        style={{
+          flex: 1,
+          accentColor: "var(--accent)",
+          cursor: disabled ? "not-allowed" : "pointer",
+          opacity: disabled ? 0.45 : 1,
+        }}
+      />
+      <span className="za-mono" style={{ width: 44, textAlign: "right" }}>
+        {value}%
       </span>
     </div>
   );

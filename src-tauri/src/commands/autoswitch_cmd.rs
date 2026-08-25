@@ -1,5 +1,7 @@
 //! 自动切换规则 CRUD
-use crate::autoswitch::{log_attempt, norm_dir, project_session_stats, switch_provider};
+use crate::autoswitch::{
+    log_attempt, norm_dir, project_session_stats, switch_provider, sync_primary_if_enabled,
+};
 use crate::state::AppState;
 use crate::types::{AutoSwitchLog, AutoSwitchRule, ProjectOption};
 use crate::zcode::config_file;
@@ -141,10 +143,15 @@ pub async fn test_rule(
         .as_deref()
         .map(|m| !m.is_empty())
         .unwrap_or(false);
-    // 已是目标供应商且无模型目标 → 无事可做；
+    // 已是目标供应商且无模型目标 → 无事可做（但主供应商联动仍执行）；
     // 有模型目标 → 交给 switch_provider（直写全部目标会话的模型选择）
     if current.as_deref() == Some(rule.to_provider.as_str()) && !has_model {
-        let msg = "当前已是目标供应商，无需切换";
+        sync_primary_if_enabled(&state, &rule);
+        let msg = if rule.switch_primary {
+            "当前已是目标供应商，无需切换；主供应商已同步为目标供应商"
+        } else {
+            "当前已是目标供应商，无需切换"
+        };
         log_attempt(&state.db, &rule, "manual", true, Some(msg));
         return Ok(msg.to_string());
     }
@@ -152,12 +159,18 @@ pub async fn test_rule(
     match switch_provider(&app, &family, &rule) {
         Ok(()) => {
             log_attempt(&state.db, &rule, "manual", true, None);
-            Ok(if restart_mode {
-                "已写入配置与会话模型选择，并重启 ZCode，全部对话使用目标供应商 / 模型".to_string()
-            } else if already_provider {
-                "已是目标供应商，已写入各会话的模型选择（对话恢复 / 新开时生效）".to_string()
+            // 开了主供应商联动时在提示里说明（联动在 switch_provider 内已完成）
+            let primary_note = if rule.switch_primary {
+                "；主供应商已同步为目标供应商"
             } else {
-                "已写入配置与会话模型选择（ZCode 未重启，各对话在恢复 / 新开时生效）".to_string()
+                ""
+            };
+            Ok(if restart_mode {
+                format!("已写入配置与会话模型选择，并重启 ZCode，全部对话使用目标供应商 / 模型{primary_note}")
+            } else if already_provider {
+                format!("已是目标供应商，已写入各会话的模型选择（对话恢复 / 新开时生效）{primary_note}")
+            } else {
+                format!("已写入配置与会话模型选择（ZCode 未重启，各对话在恢复 / 新开时生效）{primary_note}")
             })
         }
         Err(e) => {

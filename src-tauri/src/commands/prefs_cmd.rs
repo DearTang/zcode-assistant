@@ -121,3 +121,76 @@ pub async fn set_autostart(
     let _ = app.emit("prefs://updated", current_prefs(&state.db));
     Ok(())
 }
+
+/// 启动自愈开机自启（在 setup 里、任何窗口显示前调用，无并发竞态）：
+/// 升级流程跑旧版卸载器曾把 HKCU Run 自启项删掉（NSIS 模板已修，此处兜底
+/// 历史版本与异常场景），安装目录变化也会留下指向旧路径的死注册项。
+/// 以应用内开关为准：偏好为开启但系统未注册 → 重新注册；注册项指向别的
+/// exe → 重注册刷新路径。偏好为关闭（应用内关过）则不动系统状态。
+pub fn reconcile_autostart(app: &AppHandle) {
+    let kv_on = app
+        .state::<AppState>()
+        .db
+        .kv_get(KV_AUTOSTART)
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !kv_on {
+        return;
+    }
+    let manager = app.autolaunch();
+    match manager.is_enabled() {
+        Ok(false) => {
+            if let Err(e) = manager.enable() {
+                log::warn!("开机自启自愈（重新注册）失败: {e}");
+            }
+        }
+        Ok(true) => {
+            if run_key_stale() {
+                let _ = manager.disable();
+                if let Err(e) = manager.enable() {
+                    log::warn!("开机自启自愈（刷新注册路径）失败: {e}");
+                }
+            }
+        }
+        Err(_) => {}
+    }
+}
+
+/// Windows：检查 HKCU Run 里本应用的注册项（值名 = productName）是否仍指向
+/// 当前 exe；安装目录变化、旧目录残留注册时会失配。查询失败按"未失配"处理，
+/// 不折腾。非 Windows 恒为 false（路径校验仅 Windows 注册表有此形态）。
+#[cfg(windows)]
+fn run_key_stale() -> bool {
+    use crate::zcode::process::no_window;
+    let Ok(cur) = std::env::current_exe() else {
+        return false;
+    };
+    let cur = cur.to_string_lossy().replace('/', "\\").to_lowercase();
+    let Ok(out) = no_window(&mut std::process::Command::new("reg"))
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "zcode-assistant",
+        ])
+        .output()
+    else {
+        return false;
+    };
+    let txt = String::from_utf8_lossy(&out.stdout).to_lowercase();
+    let Some(line) = txt.lines().find(|l| l.contains("reg_sz")) else {
+        return false;
+    };
+    let val = line
+        .splitn(2, "reg_sz")
+        .nth(1)
+        .unwrap_or("")
+        .trim()
+        .replace('/', "\\");
+    !val.contains(&cur)
+}
+
+#[cfg(not(windows))]
+fn run_key_stale() -> bool {
+    false
+}

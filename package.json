@@ -1,7 +1,7 @@
 {
   "name": "zcode-assistant",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.6.0",
   "type": "module",
   "description": "zcode 使用增强工具：配额监控、模型管理、自动切换、悬浮球、账号切换",
   "scripts": {

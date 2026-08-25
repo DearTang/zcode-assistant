@@ -119,6 +119,8 @@ pub struct AutoSwitchRule {
     pub created_at: String,
     #[serde(default)]
     pub project_dir: Option<String>, // 项目目录（限定：仅该项目为最近对话项目时触发；None=全部项目）
+    #[serde(default)]
+    pub switch_primary: bool, // 切换时同步 zcode-assistant 主供应商标记到目标供应商（总览/悬浮球/托盘配额跟随）
 }
 
 /// 自动切换可选项目（当前打开且有具体对话的项目）
