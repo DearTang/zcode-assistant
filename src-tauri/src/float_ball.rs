@@ -2,9 +2,11 @@
 //! + 点击展开的迷你面板窗口。
 //!
 //! 诊断日志走 eprintln!（直写 stderr，无需 logger backend），定位「点击不展开 / 拖不动」类问题。
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
 };
 
 const LOGICAL_BALL: f64 = 64.0; // 球视觉尺寸
@@ -12,6 +14,16 @@ const LOGICAL_WIN_W: f64 = 100.0; // 窗口宽（容纳下方 tooltip，避免�
 const LOGICAL_WIN_H: f64 = 112.0; // 窗口高：球 64 + tooltip 区
 const LOGICAL_PANEL_W: f64 = 280.0;
 const LOGICAL_PANEL_H: f64 = 300.0;
+
+/// 面板固定态：固定（true）时忽略球/面板鼠标离开的自动收起联动，
+/// 点击面板窗口外也不会关闭；再次单击球或点面板 ✕ 才收起。
+/// 任何隐藏面板的路径都走 hide_panel，在那里统一清除并广播。
+static PANEL_PINNED: AtomicBool = AtomicBool::new(false);
+
+fn broadcast_pin_state(app: &AppHandle) {
+    let pinned = PANEL_PINNED.load(Ordering::SeqCst);
+    let _ = app.emit("float://panel-pinned", pinned);
+}
 
 /// 创建悬浮球（幂等），初始贴右侧偏上，固定显示。
 pub fn ensure_float_ball(app: &AppHandle) -> tauri::Result<()> {
@@ -163,11 +175,33 @@ pub fn toggle_panel(app: &AppHandle) -> tauri::Result<()> {
 
 pub fn hide_panel(app: &AppHandle) {
     eprintln!("[float-panel] hide_panel");
+    // 面板已隐藏即不存在「固定显示」；清除并广播，让悬浮球指示灯、面板状态同步复位
+    if PANEL_PINNED.swap(false, Ordering::SeqCst) {
+        broadcast_pin_state(app);
+    }
     if let Some(p) = app.get_webview_window("float-panel") {
         if let Err(e) = p.hide() {
             eprintln!("[float-panel] hide_panel failed: {e}");
         }
     }
+}
+
+/// 单击悬浮球触发的「固定 / 取消固定」面板：
+/// - 未固定 → 展开并固定（常驻：鼠标移开、点击面板窗口外都不收起）
+/// - 已固定 → 收起（hide_panel 顺带清固定态）
+/// hover 快速查看的自动收起行为不受影响（固定态仅由本函数置位）。
+pub fn toggle_pin_panel(app: &AppHandle) -> tauri::Result<()> {
+    let pinned = PANEL_PINNED.load(Ordering::SeqCst);
+    if pinned {
+        eprintln!("[float-panel] unpin → hide");
+        hide_panel(app);
+    } else {
+        eprintln!("[float-panel] pin → show");
+        PANEL_PINNED.store(true, Ordering::SeqCst);
+        show_panel(app)?;
+        broadcast_pin_state(app);
+    }
+    Ok(())
 }
 
 /// 展开面板：幂等纯显示（不存在则创建后显示），**不 toggle、不抢焦点**。

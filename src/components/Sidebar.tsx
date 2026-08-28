@@ -11,6 +11,7 @@ import {
   IconUser,
   IconGlobe,
   IconSparkle,
+  IconSliders,
   IconSettings,
   IconSun,
   IconMoon,
@@ -33,6 +34,7 @@ const NAV: NavEntry[] = [
   { id: "accounts", label: "智谱账号", icon: IconUser },
   { id: "proxy", label: "网络代理", icon: IconGlobe },
   { id: "beautify", label: "ZCode 美化", icon: IconSparkle },
+  { id: "zcode-settings", label: "ZCode 设置", icon: IconSliders },
   { id: "settings", label: "设置", icon: IconSettings },
 ];
 

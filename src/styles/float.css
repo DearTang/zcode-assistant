@@ -37,9 +37,22 @@ html.za-floatball #root::before {
   place-items: center;
   cursor: grab;
   user-select: none;
+  position: relative;
 }
 .fb-ball:active {
   cursor: grabbing;
+}
+/* 固定面板指示：球右上角小亮点（单击球固定/收起面板） */
+.fb-pin-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+  z-index: 5;
 }
 .fb-stage {
   width: 100px;
@@ -213,6 +226,37 @@ html.za-floatpanel #root::before {
 .fp-title {
   font-weight: 600;
   font-size: var(--fs-md);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 固定态徽标（面板常驻，点击窗口外不收起） */
+.fp-pin-badge {
+  font-size: var(--fs-xs);
+  font-weight: 400;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 0 6px;
+  line-height: 16px;
+}
+/* 面板关闭按钮：默认低调，hover 才显形 */
+.fp-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.fp-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
 }
 .fp-row {
   display: flex;

@@ -9,6 +9,7 @@ import Projects from "./views/Projects";
 import Accounts from "./views/Accounts";
 import Proxy from "./views/Proxy";
 import Beautify from "./views/Beautify";
+import ZcodeSettings from "./views/ZcodeSettings";
 import Settings from "./views/Settings";
 import { IconActivity } from "./components/icons";
 import { RestartDialog } from "./components/RestartDialog";
@@ -37,6 +38,7 @@ const META: Record<ViewId, { title: string; sub: string }> = {
   accounts: { title: "智谱账号", sub: "多账号捕获与切换" },
   proxy: { title: "网络代理", sub: "HTTP / SOCKS5 代理" },
   beautify: { title: "ZCode 美化", sub: "换肤 · 换字体 · 自定义配色（可还原）" },
+  "zcode-settings": { title: "ZCode 设置", sub: "调参 ZCode 本体行为 · 模型调用重试" },
   settings: { title: "设置", sub: "主题 · 关于" },
 };
 
@@ -246,6 +248,7 @@ export default function App() {
             {view === "accounts" && <Accounts />}
             {view === "proxy" && <Proxy />}
             {view === "beautify" && <Beautify />}
+            {view === "zcode-settings" && <ZcodeSettings />}
             {view === "settings" && <Settings />}
           </div>
         </main>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { win, events, prefs as prefsApi, pickRingBuckets, feLog } from "../api";
 import { DualRing } from "../components/DualRing";
@@ -6,19 +6,26 @@ import type { AppPrefs, QuotaOverview } from "../types";
 
 const clamp = (n: number) => Math.max(0, Math.min(100, n));
 
+/** 单击与双击的判定窗口：单击延迟固定面板，双击取消挂起的固定并打开主界面 */
+const CLICK_DELAY = 260;
+
 /**
- * 悬浮球：悬停 → 展开信息面板（float-panel 独立窗口），双击 → 打开主界面，拖拽 → 移动。
+ * 悬浮球：悬停 → 展开信息面板（float-panel 独立窗口），单击 → 固定/取消固定
+ * 面板（固定后鼠标移开、点击窗口外都不收起），双击 → 打开主界面，拖拽 → 移动。
  * 鼠标离开时通过 float://ball-leave 通知面板延迟隐藏（球与面板是两个 OS 窗口，
  * 跨窗口 hover 需事件总线协调，否则移到面板途中会触发隐藏）。
  */
 export default function FloatBall() {
   const [data, setData] = useState<QuotaOverview | null>(null);
+  const [pinned, setPinned] = useState(false);
   const [prefs, setPrefs] = useState<AppPrefs>({
     floatBallVisible: true,
     usageDisplay: "used",
     switchRestartZcode: true,
     autostart: false,
   });
+  const clickTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wasDragged = useRef(false);
 
   useEffect(() => {
     feLog("mounted, label=" + getCurrentWindow().label);
@@ -35,9 +42,14 @@ export default function FloatBall() {
     prefsApi.get().then(setPrefs).catch(() => {});
     let unPrefs: (() => void) | undefined;
     events.onPrefsUpdated(setPrefs).then((fn) => (unPrefs = fn));
+    // 面板固定态（单击球切换；面板 ✕ / 再次单击收起时复位）→ 显示指示点
+    let unPin: (() => void) | undefined;
+    events.onPanelPinned(setPinned).then((fn) => (unPin = fn));
     return () => {
       un?.();
       unPrefs?.();
+      unPin?.();
+      if (clickTimer.current) clearTimeout(clickTimer.current);
     };
   }, []);
 
@@ -52,6 +64,11 @@ export default function FloatBall() {
 
   const onMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0) return;
+    // 新一次按下即取消挂起的单击固定（快速点一下又按住拖拽的场景不应触发固定）
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+    }
     const startX = e.screenX;
     const startY = e.screenY;
     feLog(
@@ -77,6 +94,7 @@ export default function FloatBall() {
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      wasDragged.current = dragged;
       feLog(`mouseup, dragged=${dragged}`);
     };
     window.addEventListener("mousemove", onMove);
@@ -95,8 +113,29 @@ export default function FloatBall() {
     events.emitBallLeave().catch(() => {});
   };
 
-  // 双击 → 打开主界面（单击已由悬停展示面板，不再 toggle）
+  // 单击 → 固定/取消固定面板。双击会先触发两次 click：第二次命中挂起定时器
+  // 直接忽略，随后 dblclick 取消定时器并打开主界面，避免固定态被误切换。
+  const onClick = () => {
+    if (wasDragged.current) {
+      wasDragged.current = false;
+      return;
+    }
+    if (clickTimer.current) return;
+    clickTimer.current = setTimeout(() => {
+      clickTimer.current = null;
+      feLog("click → toggle_float_panel_pin");
+      win
+        .toggleFloatPanelPin()
+        .catch((e) => feLog("toggleFloatPanelPin ERR: " + String(e), "error"));
+    }, CLICK_DELAY);
+  };
+
+  // 双击 → 打开主界面（取消挂起的单击固定）
   const onDoubleClick = () => {
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+    }
     feLog("dblclick → showMain");
     win.showMain().catch((e) => feLog("showMain ERR: " + String(e), "error"));
   };
@@ -104,12 +143,15 @@ export default function FloatBall() {
   return (
     <div className="fb-stage">
       <div
-        className="fb-ball"
+        className={pinned ? "fb-ball fb-ball-pinned" : "fb-ball"}
         onMouseDown={onMouseDown}
         onMouseEnter={onMouseEnter}
         onMouseLeave={onMouseLeave}
+        onClick={onClick}
         onDoubleClick={onDoubleClick}
+        title={pinned ? "面板已固定：单击球收起，双击打开主界面" : "单击固定面板，双击打开主界面"}
       >
+        {pinned && <span className="fb-pin-dot" />}
         <div className="fb-inner">
           <div
             style={{

@@ -145,7 +145,25 @@ export type ViewId =
   | "accounts"
   | "proxy"
   | "beautify"
+  | "zcode-settings"
   | "settings";
+
+/* ============ ZCode 设置：模型调用重试 ============ */
+
+/**
+ * 模型调用重试配置（ZCode 官方 ZCODE_MODEL_RETRY_* 用户环境变量，全局生效）。
+ * 字段 null = 未设置该变量，跟随 ZCode 默认（10 次重试 / 2s / ×2 / 60s）。
+ */
+export interface ModelRetryConfig {
+  /** 最大重试次数（默认 10；0 = 失败不重试） */
+  maxRetries: number | null;
+  /** 重试起步延迟 ms（默认 2000） */
+  baseDelayMs: number | null;
+  /** 指数退避倍数（默认 2） */
+  backoffFactor: number | null;
+  /** 单次重试延迟上限 ms（默认 60000） */
+  maxDelayMs: number | null;
+}
 
 /* ============ 项目管理（数据源：zcode cli db）============ */
 

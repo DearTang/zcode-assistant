@@ -118,6 +118,7 @@ pub fn run() {
             commands::window::show_float_panel,
             commands::window::hide_float_panel,
             commands::window::toggle_float_panel,
+            commands::window::toggle_float_panel_pin,
             commands::window::quit_app,
             commands::window::restart_app,
             commands::window::set_tray_icon,
@@ -136,6 +137,9 @@ pub fn run() {
             commands::zcode_cmd::reload_zcode_window,
             commands::zcode_cmd::switch_zcode_model,
             commands::zcode_cmd::select_provider,
+            // ZCode 设置：模型调用重试（官方 ZCODE_MODEL_RETRY_* 环境变量）
+            commands::retry_cmd::get_model_retry_config,
+            commands::retry_cmd::set_model_retry_config,
             // 模型管理
             commands::models_cmd::fetch_available_models,
             commands::models_cmd::builtin_model_specs,

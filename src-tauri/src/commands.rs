@@ -9,6 +9,7 @@ pub mod models_cmd;
 pub mod prefs_cmd;
 pub mod proxy_cmd;
 pub mod quota_cmd;
+pub mod retry_cmd;
 pub mod sessions_cmd;
 pub mod templates_cmd;
 pub mod token_cmd;

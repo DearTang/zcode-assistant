@@ -187,6 +187,14 @@ export const IconSparkle = (p: P) => (
   </svg>
 );
 
+/** 调节滑杆（ZCode 设置页：调参语义，区别于齿轮的通用设置） */
+export const IconSliders = (p: P) => (
+  <svg {...svg(p)}>
+    <path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3" />
+    <path d="M1 14h6M9 8h6M17 16h6" />
+  </svg>
+);
+
 export const IconChart = (p: P) => (
   <svg {...svg(p)}>
     <path d="M3 3v18h18" />

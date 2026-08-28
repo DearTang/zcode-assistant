@@ -17,6 +17,7 @@ import type {
   DownloadProgress,
   HealthReport,
   ModelSpec,
+  ModelRetryConfig,
   ProxyConfig,
   QuotaBucket,
   QuotaTemplate,
@@ -43,6 +44,8 @@ export const win = {
   showFloatPanel: () => invoke<void>("show_float_panel"),
   hideFloatPanel: () => invoke<void>("hide_float_panel"),
   toggleFloatPanel: () => invoke<void>("toggle_float_panel"),
+  /** 固定/取消固定展开面板（固定 = 鼠标移开、点击窗口外都不收起，单击悬浮球触发） */
+  toggleFloatPanelPin: () => invoke<void>("toggle_float_panel_pin"),
   quitApp: () => invoke<void>("quit_app"),
   /** 覆盖启动：结束当前进程并重新拉起（单实例弹窗用） */
   restartApp: () => invoke<void>("restart_app"),
@@ -104,6 +107,11 @@ export const zcode = {
    */
   switchModel: (providerKey: string, modelKey?: string) =>
     invoke<void>("switch_zcode_model", { providerKey, modelKey }),
+  /** 模型调用重试配置（ZCODE_MODEL_RETRY_* 用户环境变量；null = 跟随 ZCode 默认） */
+  getRetryConfig: () => invoke<ModelRetryConfig>("get_model_retry_config"),
+  /** 写入重试配置（reg add/delete + 广播环境变更；ZCode 运行中会弹重启确认） */
+  setRetryConfig: (config: ModelRetryConfig) =>
+    invoke<ModelRetryConfig>("set_model_retry_config", { config }),
 };
 
 /* ============ 模型管理（M2）============ */
@@ -563,6 +571,9 @@ export const events = {
   emitBallLeave: (): Promise<void> => emit("float://ball-leave", null),
   onBallLeave: (cb: () => void): Promise<UnlistenFn> =>
     listen("float://ball-leave", () => cb()),
+  /** 面板固定态广播（后端固定/收起面板时发出；悬浮球指示灯与面板自身监听联动） */
+  onPanelPinned: (cb: (pinned: boolean) => void): Promise<UnlistenFn> =>
+    listen<boolean>("float://panel-pinned", (e) => cb(e.payload)),
   /** 模型切换广播 */
   onModelSwitched: (
     cb: (p: { providerKey: string }) => void

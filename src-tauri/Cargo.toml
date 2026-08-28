@@ -1,6 +1,6 @@
 [package]
 name = "zcode-assistant"
-version = "0.6.0"
+version = "0.7.0"
 description = "zcode 使用增强工具"
 authors = ["zcode-assistant"]
 edition = "2021"
@@ -79,8 +79,12 @@ windows = { version = "0.61", features = [
 
 [profile.release]
 panic = "abort"
-codegen-units = 1
-lto = true
+# fat LTO（lto=true）每次构建都要对整个依赖图做串行全量重优化，是打包最大瓶颈；
+# thin LTO 并行执行、缓存友好，二进制大小与运行性能几乎无损（差 <1%）。
+lto = "thin"
+# codegen-units=1 同样是拿构建时间换单点性能的极端项；16 为默认并行度，
+# 配合 thin LTO 仍保留跨 crate 优化，桌面 GUI 场景运行性能无可感知差异。
+codegen-units = 16
 opt-level = "s"
 strip = true
 # 增量编译：重复打包只重编改动部分（缓存 target/release/incremental/）。

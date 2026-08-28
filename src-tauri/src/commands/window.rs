@@ -33,6 +33,13 @@ pub async fn toggle_float_panel(app: AppHandle) -> Result<(), String> {
     crate::float_ball::toggle_panel(&app).map_err(|e| e.to_string())
 }
 
+/// 单击悬浮球触发：固定 / 取消固定展开面板（固定 = 鼠标移开、点击面板窗口外都不收起）。
+/// 详见 float_ball::toggle_pin_panel。
+#[tauri::command]
+pub async fn toggle_float_panel_pin(app: AppHandle) -> Result<(), String> {
+    crate::float_ball::toggle_pin_panel(&app).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);

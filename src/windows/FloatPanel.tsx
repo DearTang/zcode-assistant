@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { IconClose } from "../components/icons";
 import {
   win,
   events,
@@ -18,9 +19,13 @@ const HIDE_DELAY = 250;
  *   球离开 → 发 ball-leave → 本面板 250ms 后隐藏；
  *   鼠标进入本面板 → 取消隐藏；离开本面板 → 立即隐藏。
  * （球与面板是两个 OS 窗口，跨窗口 hover 必须用事件总线，否则移到面板途中会被隐藏）
+ *
+ * 固定态（float://panel-pinned，单击悬浮球切换）：面板常驻——忽略上述所有
+ * 自动收起联动，点击面板窗口外也不关闭；再次单击球或点本面板 ✕ 才收起。
  */
 export default function FloatPanel() {
   const [q, setQ] = useState<QuotaOverview | null>(null);
+  const [pinned, setPinned] = useState(false);
   const [prefs, setPrefs] = useState<AppPrefs>({
     floatBallVisible: true,
     usageDisplay: "used",
@@ -28,6 +33,9 @@ export default function FloatPanel() {
     autostart: false,
   });
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 事件回调里读最新固定态（闭包旧值问题），render 时同步
+  const pinnedRef = useRef(false);
+  pinnedRef.current = pinned;
 
   const cancelHide = () => {
     if (hideTimer.current) {
@@ -36,6 +44,7 @@ export default function FloatPanel() {
     }
   };
   const scheduleHide = () => {
+    if (pinnedRef.current) return;
     cancelHide();
     hideTimer.current = setTimeout(() => {
       feLog("panel: hide by scheduled timer");
@@ -43,6 +52,7 @@ export default function FloatPanel() {
     }, HIDE_DELAY);
   };
   const hideNow = () => {
+    if (pinnedRef.current) return;
     cancelHide();
     win.hideFloatPanel();
   };
@@ -59,10 +69,14 @@ export default function FloatPanel() {
     // 球离开 → 延迟隐藏
     let unLeave: (() => void) | undefined;
     events.onBallLeave(() => scheduleHide()).then((fn) => (unLeave = fn));
+    // 固定态联动（单击球固定/收起时后端广播）
+    let unPin: (() => void) | undefined;
+    events.onPanelPinned(setPinned).then((fn) => (unPin = fn));
     return () => {
       unQ?.();
       unPrefs?.();
       unLeave?.();
+      unPin?.();
       cancelHide();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -79,7 +93,19 @@ export default function FloatPanel() {
     <div className="fp-root" onMouseEnter={cancelHide} onMouseLeave={hideNow}>
       <div className="fp-card">
         <div className="fp-header">
-          <span className="fp-title">zcode-assistant</span>
+          <span className="fp-title">
+            zcode-assistant{pinned && <span className="fp-pin-badge">已固定</span>}
+          </span>
+          <button
+            className="fp-close"
+            title={pinned ? "收起面板（取消固定）" : "收起面板"}
+            onClick={() => {
+              feLog("panel: close by ✕");
+              win.hideFloatPanel();
+            }}
+          >
+            <IconClose width={12} height={12} />
+          </button>
         </div>
 
         <div className="fp-row">
