@@ -7,7 +7,7 @@
   版本号遵循语义化版本（https://semver.org/lang/zh-CN/）。
   发版流程见 AGENTS.md「Slash rule: 打包」；baseline 记录上一次发布的版本，
   用于步骤 3 的 `git diff --stat <baseline>..HEAD` 完整度核对。
-  baseline: v0.7.0
+  baseline: v0.8.0
 -->
 
 # 更新日志
