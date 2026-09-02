@@ -379,6 +379,17 @@ export default function AutoSwitch() {
       toast.error("请填写执行时间");
       return;
     }
+    if (editing.kind === "appstart") {
+      // 全天生效 = 起止均空；填了任意一端就必须填全
+      if (!!(editing.timeStart || editing.timeEnd) && !(editing.timeStart && editing.timeEnd)) {
+        toast.error("请填写完整的生效时间范围，或改回「全天生效」");
+        return;
+      }
+      if (editing.timeStart && editing.timeStart === editing.timeEnd) {
+        toast.error("生效时间范围的起止不能相同");
+        return;
+      }
+    }
     try {
       await sw.upsertRule({ ...editing, name });
       setEditing(null);
@@ -481,7 +492,7 @@ export default function AutoSwitch() {
         </div>
         <p className="za-muted" style={{ margin: "0 0 12px" }}>
           ① 定时（指定执行时间 / 星期 → 切到目标）② 配额耗尽（剩余 ≤ 阈值 →
-          切到目标）③ 应用启动（本应用启动后自动执行一次）。列表顺序即优先级，拖动手柄可调整。
+          切到目标）③ 应用启动（本应用启动后自动执行一次，可限定生效时间范围，默认全天）。列表顺序即优先级，拖动手柄可调整。
           可点「测试」立即手动执行一次切换。切换会写入配置与全部符合条件的会话（规则限定项目时仅该项目）：
           开启「设置 → 切换后重启 ZCode」（默认）时自动重启 ZCode，全部对话立即生效；
           关闭时不重启，各对话在恢复 / 新开时生效。
@@ -569,7 +580,11 @@ export default function AutoSwitch() {
                         } → ${providerLabel(r.toProvider)}${r.toModel ? "/" + r.toModel : ""}`
                       : r.kind === "drain"
                         ? `剩余≤${r.threshold ?? 0} → ${providerLabel(r.toProvider)}${r.toModel ? "/" + r.toModel : ""}`
-                        : `应用启动 → ${providerLabel(r.toProvider)}${r.toModel ? "/" + r.toModel : ""}`}
+                        : `应用启动${
+                            r.timeStart && r.timeEnd
+                              ? `（${r.timeStart}–${r.timeEnd} 生效）`
+                              : ""
+                          } → ${providerLabel(r.toProvider)}${r.toModel ? "/" + r.toModel : ""}`}
                   </div>
                 </div>
               </div>
@@ -625,12 +640,18 @@ export default function AutoSwitch() {
               <select
                 className="za-select"
                 value={editing.kind}
-                onChange={(e) =>
+                onChange={(e) => {
+                  const kind = e.target.value as AutoSwitchRule["kind"];
                   setEditing({
                     ...editing,
-                    kind: e.target.value as AutoSwitchRule["kind"],
-                  })
-                }
+                    kind,
+                    // 切到应用启动清空 cron 残留的执行时间：从「全天生效」起步，
+                    // 避免显示为全天却残留半截范围导致保存校验误报
+                    ...(kind === "appstart"
+                      ? { timeStart: "", timeEnd: "" }
+                      : {}),
+                  });
+                }}
               >
                 <option value="cron">定时切换</option>
                 <option value="drain">配额耗尽</option>
@@ -789,16 +810,67 @@ export default function AutoSwitch() {
                 />
               </label>
             ) : (
-              <div
-                className="za-faint"
-                style={{
-                  fontSize: "var(--fs-xs)",
-                  alignSelf: "end",
-                  paddingBottom: 8,
-                }}
-              >
-                本应用每次启动后自动执行一次切换（免重启，下一轮对话生效）
-              </div>
+              <>
+                <label style={field}>
+                  生效时间
+                  <select
+                    className="za-select"
+                    value={
+                      editing.timeStart && editing.timeEnd ? "range" : "allday"
+                    }
+                    onChange={(e) => {
+                      if (e.target.value === "allday") {
+                        setEditing({ ...editing, timeStart: "", timeEnd: "" });
+                      } else {
+                        // 默认整点（分钟 00）；已填过则保留原值
+                        setEditing({
+                          ...editing,
+                          timeStart: editing.timeStart || "09:00",
+                          timeEnd: editing.timeEnd || "18:00",
+                        });
+                      }
+                    }}
+                  >
+                    <option value="allday">全天生效</option>
+                    <option value="range">指定时间范围</option>
+                  </select>
+                </label>
+                {editing.timeStart && editing.timeEnd ? (
+                  <label style={field}>
+                    时间范围（跨零点请让结束时间小于开始时间）
+                    <span className="za-row" style={{ gap: 6 }}>
+                      <input
+                        type="time"
+                        className="za-input"
+                        value={editing.timeStart}
+                        onChange={(e) =>
+                          setEditing({ ...editing, timeStart: e.target.value })
+                        }
+                      />
+                      <span className="za-faint">至</span>
+                      <input
+                        type="time"
+                        className="za-input"
+                        value={editing.timeEnd}
+                        onChange={(e) =>
+                          setEditing({ ...editing, timeEnd: e.target.value })
+                        }
+                      />
+                    </span>
+                  </label>
+                ) : (
+                  <div
+                    className="za-faint"
+                    style={{
+                      fontSize: "var(--fs-xs)",
+                      alignSelf: "end",
+                      paddingBottom: 8,
+                    }}
+                  >
+                    本应用每次启动后自动执行一次切换（免重启，下一轮对话生效）
+                  </div>
+                )}
+              </>
             )}
           </div>
           <div

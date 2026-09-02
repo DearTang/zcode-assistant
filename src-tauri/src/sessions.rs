@@ -383,6 +383,37 @@ pub fn archive_session(session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 批量归档会话（项目管理会话列表「全选 + 关闭所选」）：语义与 archive_session
+/// 一致，仅对仍活跃的顶层会话生效（已归档跳过，幂等）。返回本次实际归档的会话数。
+pub fn archive_sessions(session_ids: &[String]) -> anyhow::Result<usize> {
+    if session_ids.is_empty() {
+        return Ok(0);
+    }
+    let conn = open_rw()?;
+    let now = Local::now().timestamp_millis();
+    let mut archived = 0usize;
+    {
+        let mut stmt = conn.prepare(
+            "UPDATE session SET time_archived=?1 \
+             WHERE id=?2 AND parent_id IS NULL AND time_archived IS NULL",
+        )?;
+        for sid in session_ids {
+            archived += stmt.execute(params![now, sid])?;
+        }
+    }
+    drop(conn);
+    // 任务索引按 task_id 批量置 archived=1（更新失败仅记日志，不影响会话库归档结果）
+    let tasks = open_tasks_rw()?;
+    for chunk in session_ids.chunks(CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(",");
+        let sql = format!("UPDATE tasks SET archived=1 WHERE task_id IN ({placeholders})");
+        if let Err(e) = tasks.execute(&sql, rusqlite::params_from_iter(chunk)) {
+            log::warn!("批量归档更新任务索引失败: {e}");
+        }
+    }
+    Ok(archived)
+}
+
 /// 恢复归档会话：清掉两处归档标记（任务索引 tasks.archived/deleted + 会话库
 /// time_archived），会话重新回到 zcode 的会话列表，可继续对话。
 /// 不动 time_updated（恢复不算活跃，排序仍按真实最后活跃时间）。

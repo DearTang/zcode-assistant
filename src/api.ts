@@ -361,6 +361,9 @@ export const projects = {
   /** 归档会话（写 time_archived + 任务索引 archived=1，zcode 会话列表隐藏，可恢复） */
   archiveSession: (sessionId: string) =>
     invoke<void>("zc_archive_session", { sessionId }),
+  /** 批量归档会话（仅仍活跃的生效，已归档跳过），返回实际归档的会话数 */
+  archiveSessions: (sessionIds: string[]) =>
+    invoke<number>("zc_archive_sessions", { sessionIds }),
   /** 恢复归档会话（清任务索引与会话库的归档标记，回 zcode 会话列表继续对话） */
   restoreSession: (sessionId: string) =>
     invoke<void>("zc_restore_session", { sessionId }),

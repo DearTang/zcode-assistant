@@ -54,6 +54,7 @@ export default function Projects() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   // 查看历史开关：全局（默认隐藏全部会话均已归档的项目）
   const [showHistory, setShowHistory] = useState(false);
   // 项目内开关（默认隐藏归档会话），按项目 id 记忆
@@ -180,6 +181,31 @@ export default function Projects() {
     }
   };
 
+  // ============ 批量关闭（归档所选会话） ============
+  const doArchiveSelected = async () => {
+    const sids = [...selectedSessions];
+    if (sids.length === 0) return;
+    if (
+      !confirm(
+        `将关闭（归档）所选 ${sids.length} 个会话（已归档的自动跳过），在 zcode 会话列表隐藏，可随时在「查看历史会话」中恢复。继续？`
+      )
+    ) {
+      return;
+    }
+    setArchiving(true);
+    try {
+      const n = await projectsApi.archiveSessions(sids);
+      clearSelection();
+      if (expandedId) await loadSessions(expandedId, true);
+      await reload();
+      toast.success(`已关闭（归档）${n} 个会话，可在「查看历史会话」中恢复`);
+    } catch (e: unknown) {
+      toast.error(`关闭失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setArchiving(false);
+    }
+  };
+
   // ============ 恢复项目 ============
   const doRestoreProject = async (p: ZcProject) => {
     if (p.archivedSessions === 0) return;
@@ -270,6 +296,24 @@ export default function Projects() {
     ? sessions
     : sessions.filter((s) => !s.archived);
   const archivedCount = sessions.filter((s) => s.archived).length;
+  // 会话表头全选：作用于当前展开项目的可见会话（半选 = 只选中了其中一部分）
+  const allSessionsSelected =
+    visibleSessions.length > 0 &&
+    visibleSessions.every((s) => selectedSessions.has(s.id));
+  const someSessionsSelected = visibleSessions.some((s) =>
+    selectedSessions.has(s.id)
+  );
+  const toggleSelectAllSessions = () => {
+    setSelectedSessions((prev) => {
+      const n = new Set(prev);
+      if (allSessionsSelected) {
+        visibleSessions.forEach((s) => n.delete(s.id));
+      } else {
+        visibleSessions.forEach((s) => n.add(s.id));
+      }
+      return n;
+    });
+  };
   /** 按钮激活态样式（同用量页预设按钮） */
   const activeBtnStyle = {
     borderColor: "var(--accent)",
@@ -307,7 +351,7 @@ export default function Projects() {
         </div>
         <p className="za-muted" style={{ margin: "0 0 12px" }}>
           管理 zcode 的项目与会话：查看各项目 / 会话的 token 消耗、对话次数与创建时间，支持会话改名、
-          归档 / 恢复、批量删除。默认只显示活跃会话，开启「查看历史项目 / 查看历史会话」查看归档；
+          归档 / 恢复、全选批量关闭、批量删除。默认只显示活跃会话，开启「查看历史项目 / 查看历史会话」查看归档；
           删除会同时清理消息、用量记录与本地缓存，不可恢复。
         </p>
 
@@ -329,6 +373,16 @@ export default function Projects() {
               <button className="za-btn za-btn-sm" onClick={clearSelection} disabled={deleting}>
                 取消选择
               </button>
+              {selectedSessions.size > 0 && (
+                <button
+                  className="za-btn za-btn-sm"
+                  onClick={doArchiveSelected}
+                  disabled={archiving || deleting}
+                  title="批量关闭所选会话（归档：zcode 会话列表隐藏，可随时恢复）"
+                >
+                  {archiving ? "关闭中…" : "关闭所选"}
+                </button>
+              )}
               <button
                 className="za-btn za-btn-sm"
                 style={{ color: "#e5484d", borderColor: "#e5484d" }}
@@ -501,7 +555,24 @@ export default function Projects() {
                           <table className="za-usage-table">
                             <thead>
                               <tr>
-                                <th style={{ width: 28 }}></th>
+                                <th style={{ width: 28 }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={allSessionsSelected}
+                                    ref={(el) => {
+                                      if (el)
+                                        el.indeterminate =
+                                          someSessionsSelected &&
+                                          !allSessionsSelected;
+                                    }}
+                                    onChange={toggleSelectAllSessions}
+                                    title="全选 / 取消全选当前显示的会话"
+                                    style={{
+                                      accentColor: "var(--accent)",
+                                      verticalAlign: "middle",
+                                    }}
+                                  />
+                                </th>
                                 <th className="za-ut-l">会话</th>
                                 <th>对话</th>
                                 <th>调用</th>

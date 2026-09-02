@@ -219,6 +219,7 @@ pub fn run() {
             commands::sessions_cmd::zc_rename_session,
             commands::sessions_cmd::zc_restore_session,
             commands::sessions_cmd::zc_archive_session,
+            commands::sessions_cmd::zc_archive_sessions,
             commands::sessions_cmd::zc_archive_project,
             commands::sessions_cmd::zc_restore_project,
             commands::sessions_cmd::zc_delete,

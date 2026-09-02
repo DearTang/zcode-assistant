@@ -31,6 +31,12 @@ pub fn zc_archive_session(session_id: String) -> Result<(), String> {
     sessions::archive_session(&session_id).map_err(|e| e.to_string())
 }
 
+/// 批量归档会话（仅仍活跃的顶层会话生效），返回本次实际归档的会话数
+#[tauri::command]
+pub fn zc_archive_sessions(session_ids: Vec<String>) -> Result<usize, String> {
+    sessions::archive_sessions(&session_ids).map_err(|e| e.to_string())
+}
+
 /// 恢复归档会话（清任务索引 archived/deleted 与会话库 time_archived，
 /// 回到 zcode 会话列表可继续对话）
 #[tauri::command]

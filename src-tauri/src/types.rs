@@ -104,11 +104,11 @@ pub struct QuotaTemplate {
 pub struct AutoSwitchRule {
     pub id: String,
     pub name: String,
-    pub kind: String, // "cron" | "drain"
+    pub kind: String, // "cron" | "drain" | "appstart"
     pub enabled: bool,
-    pub time_start: Option<String>, // "HH:MM"（cron 执行时间）
+    pub time_start: Option<String>, // "HH:MM"（cron 执行时间；appstart 为生效范围开始）
     #[serde(default)]
-    pub time_end: Option<String>, // 兼容旧数据，不再使用
+    pub time_end: Option<String>, // "HH:MM"（appstart 生效范围结束；start/end 均非空才限定，否则全天）
     pub weekdays: Option<String>, // "1,2,3,4,5,6,7"
     pub from_provider: Option<String>, // 源供应商 id（None=任意）
     pub from_model: Option<String>, // 源模型（可选，仅展示）

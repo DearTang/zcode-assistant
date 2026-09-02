@@ -1,7 +1,8 @@
 //! 自动切换调度器：每 60s 检查规则
 //! - cron：选定星期的执行时间点 → 切到目标
 //! - drain：当前 Coding Plan 配额剩余 ≤ 阈值 → 切到目标
-//! - appstart：本应用每次启动后触发一次（不进周期调度）
+//! - appstart：本应用每次启动后触发一次（不进周期调度；可限定生效时间范围，
+//!   time_start/time_end 均非空才限定，默认全天）
 //! 切换 = 直写会话模型选择（cli db 的 runtime/model_selection，会话恢复时还原
 //! 模型——setting.json 只决定新会话默认供应商）+ 直改 setting.json 的 family
 //! 选中键，再按偏好生效：偏好「切换后重启 ZCode」开（默认）→ kill + relaunch
@@ -16,14 +17,6 @@ use crate::zcode::{config_file, process};
 use chrono::{DateTime, Datelike, Local, NaiveTime, Timelike};
 use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter, Manager};
-
-/// 最近一次自动切换命中的目标（"provider|model"），供「已是目标则跳过」在
-/// 供应商相同+带目标模型时判断是否真的切到过该模型（setting.json 只存供应商级选中）
-const KV_LAST_TARGET: &str = "autoswitch_last_target";
-
-fn target_key(provider: &str, model: &str) -> String {
-    format!("{provider}|{model}")
-}
 
 pub fn spawn_scheduler(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
@@ -89,17 +82,16 @@ async fn eval_rules(app: &AppHandle, kinds: &[&str]) -> Result<(), String> {
         }
         // 已是目标 provider 则跳过（避免重复切换）。规则若指定了套餐内目标模型，
         // 供应商相同不代表会话已在目标模型上（模型是会话内状态，setting.json
-        // 不存），还需确认最近一次切换已到达该模型（两种生效模式均能到达：
-        // 重启模式重启后按库恢复，非重启模式恢复 / 新开时按库到达）
+        // 不存），以最近活跃会话的实际模型选择为准——手动切换会更新该条目，
+        // 能被感知。（此前用「最近一次切换写入的 KV 标记」判断，手动切走模型后
+        // 标记过期不更新，导致 appstart 启动触发被误判「已是目标」静默跳过）
         if current_provider.as_deref() == Some(rule.to_provider.as_str()) {
             let model = rule.to_model.as_deref().unwrap_or("");
             let hit = if model.is_empty() {
                 true
             } else {
-                state
-                    .db
-                    .kv_get(KV_LAST_TARGET)
-                    .is_some_and(|last| last == target_key(&rule.to_provider, model))
+                latest_session_selection()
+                    .is_some_and(|(p, m)| p == rule.to_provider && m == model)
             };
             if hit {
                 continue;
@@ -138,8 +130,12 @@ async fn eval_rules(app: &AppHandle, kinds: &[&str]) -> Result<(), String> {
                     }
                 }
             }
-            // 启动触发：门槛（目标非空/非已目标/项目/源）已过，直接执行
-            "appstart" => from_match,
+            // 启动触发：门槛（目标非空/非已目标/项目/源）已过，仅剩生效时间范围
+            // （start+end 均非空才限定，否则全天）
+            "appstart" => {
+                from_match
+                    && time_range_hit(&now, rule.time_start.as_deref(), rule.time_end.as_deref())
+            }
             _ => false,
         };
 
@@ -175,6 +171,32 @@ async fn eval_rules(app: &AppHandle, kinds: &[&str]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// cron 执行时间点匹配：当前时刻落在 [start, start+90s] 且星期命中。
+/// tick 每 60s 一次，90s 窗口保证不漏同一分钟；重复触发由 fired_today 兜底。
+/// appstart 生效时间范围：start 与 end 均为非空 "HH:MM" 时限定 [start, end]
+/// （end <= start 视为跨午夜，如 22:00–06:00）；任一缺失 → 全天生效。
+/// 解析失败同样回退全天，与 at_time_point 的宽容风格一致。
+fn time_range_hit(now: &DateTime<Local>, start: Option<&str>, end: Option<&str>) -> bool {
+    let (Some(s), Some(e)) = (start.map(str::trim), end.map(str::trim)) else {
+        return true;
+    };
+    if s.is_empty() || e.is_empty() {
+        return true;
+    }
+    let (Ok(st), Ok(et)) = (
+        NaiveTime::parse_from_str(s, "%H:%M"),
+        NaiveTime::parse_from_str(e, "%H:%M"),
+    ) else {
+        return true;
+    };
+    let t = now.time();
+    if et <= st {
+        t >= st || t <= et
+    } else {
+        t >= st && t <= et
+    }
 }
 
 /// cron 执行时间点匹配：当前时刻落在 [start, start+90s] 且星期命中。
@@ -252,7 +274,7 @@ pub(crate) fn sync_primary_if_enabled(state: &AppState, rule: &AutoSwitchRule) {
 ///   3) 生效：偏好「切换后重启 ZCode」开（默认）→ kill + relaunch，重启后所有
 ///      会话恢复时统一到达目标；关 → 不重启，各会话在恢复 / 新开时到达目标
 ///      （不做单会话键盘模拟——只点一个会话与其余会话状态不一致）。
-/// 完成后广播 model://switched 同步界面，并记录本次到达的目标（供跳过判断）。
+/// 完成后广播 model://switched 同步界面。
 /// 规则开启 switch_primary 时，先联动切换 zcode-assistant 主供应商标记。
 pub(crate) fn switch_provider(
     app: &AppHandle,
@@ -266,15 +288,11 @@ pub(crate) fn switch_provider(
     // 0) 主供应商标记联动（无论后续 ZCode 配置是否需要变动都执行）
     sync_primary_if_enabled(&state, rule);
 
-    // 收尾：广播「当前模型已切换」+ 记录本次到达的目标（供跳过判断）
+    // 收尾：广播「当前模型已切换」
     let finish = || {
         let _ = app.emit(
             "model://switched",
             serde_json::json!({ "providerKey": rule.to_provider }),
-        );
-        let _ = state.db.kv_set(
-            KV_LAST_TARGET,
-            &target_key(&rule.to_provider, rule.to_model.as_deref().unwrap_or("")),
         );
     };
 
@@ -403,4 +421,31 @@ fn latest_active_project() -> Option<String> {
     )
     .ok()
     .map(|d| norm_dir(&d))
+}
+
+/// 最近活跃会话的实际模型选择 (providerId, modelId)——手动在 ZCode 界面切换
+/// 模型会更新该条目，供「已是目标则跳过」判断真实状态（替代已废弃的切换 KV 标记）。
+/// 口径与 write_model_selection 的目标集合一致：顶层 interactive 未归档会话，
+/// 按 session.time_updated 取最近一条。无条目 / db 打不开时返回 None（调用方
+/// 视为未命中 → 执行切换，宁可多切不可漏切）。
+fn latest_session_selection() -> Option<(String, String)> {
+    let path = crate::zcode::paths::zcode_cli_db_path()?;
+    let conn = crate::usage::open_readonly(&path).ok()?;
+    let data: String = conn
+        .query_row(
+            "SELECT e.data FROM session_entry e \
+             JOIN session s ON s.id = e.session_id \
+             WHERE e.type='runtime/model_selection' \
+               AND s.parent_id IS NULL AND s.task_type='interactive' \
+               AND s.time_archived IS NULL \
+             ORDER BY s.time_updated DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    Some((
+        v.get("providerId")?.as_str()?.to_string(),
+        v.get("modelId")?.as_str()?.to_string(),
+    ))
 }

@@ -326,8 +326,8 @@ export interface AutoSwitchRule {
   name: string;
   kind: "cron" | "drain" | "appstart";
   enabled: boolean;
-  timeStart?: string; // "HH:MM"（cron 执行时间）
-  timeEnd?: string; // 兼容旧数据，不再使用
+  timeStart?: string; // "HH:MM"（cron 执行时间；appstart 为生效范围开始）
+  timeEnd?: string; // "HH:MM"（appstart 生效范围结束；start/end 均非空才限定，否则全天）
   weekdays?: string; // "1,2,3,4,5,6,7"
   fromProvider?: string; // 源供应商 id（留空=任意）
   fromModel?: string; // 源模型（可选，仅展示）
