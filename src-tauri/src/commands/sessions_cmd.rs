@@ -3,7 +3,7 @@ use tauri::State;
 
 use crate::sessions;
 use crate::state::AppState;
-use crate::types::{ZcDeleteResult, ZcProject, ZcSession};
+use crate::types::{ZcCacheStats, ZcDeleteResult, ZcProject, ZcSession};
 
 /// 全部项目（含会话数 / 对话次数 / token 汇总 / 时间），按最近活跃倒序。
 /// async：跨库聚合查询耗时，同步执行会冻结主线程（页面挂载即调用）。
@@ -56,7 +56,7 @@ pub fn zc_restore_project(project_id: String) -> Result<usize, String> {
     sessions::restore_project(&project_id).map_err(|e| e.to_string())
 }
 
-/// 批量删除会话 / 项目（级联删除消息与用量，连带清理任务索引、rollout 文件与本地用量记录）
+/// 批量删除会话 / 项目（级联删除消息与用量，连带清理任务索引、会话文件与本地用量记录）
 #[tauri::command]
 pub fn zc_delete(
     state: State<'_, AppState>,
@@ -69,4 +69,22 @@ pub fn zc_delete(
         project_ids.as_deref().unwrap_or_default(),
     )
     .map_err(|e| e.to_string())
+}
+
+/// 缓存清理预览：统计最后活跃早于 N 天前的顶层会话（含子代理展开）与可释放的会话文件大小。
+/// async：递归统计目录大小可能较慢，避免阻塞主线程。
+#[tauri::command]
+pub async fn zc_cache_stats(days: i64) -> Result<ZcCacheStats, String> {
+    sessions::cache_stats(days).map_err(|e| e.to_string())
+}
+
+/// 清理 N 天前未活跃的会话及其全部数据（会话行级联消息 / 用量、任务索引、agents /
+/// artifacts / exec / rollout 会话文件、本地用量记录），并尝试 VACUUM 压缩会话库。
+/// async：大量文件删除与 VACUUM 耗时，避免阻塞主线程。
+#[tauri::command]
+pub async fn zc_cache_cleanup(
+    state: State<'_, AppState>,
+    days: i64,
+) -> Result<ZcDeleteResult, String> {
+    sessions::cache_cleanup(&state.db, days).map_err(|e| e.to_string())
 }

@@ -1,53 +1,45 @@
-//! ZCode 美化：根据配置生成 zcode-custom.css，并以 asar 原地补丁方式注入
-//! app.asar 内的 index.html（不解包、不整包重打包，详见 asar::patch）。
+//! ZCode 美化：外置主题目录 + file:// 外链注入（借鉴 zai-floating-monitor/ZBar
+//! 的 agent_theme 架构，注入管线保留本项目自研的 asar 原地补丁）。
 //!
-//! 注入策略（最小侵入、最易还原）：在 `out/renderer/index.html` 的 `</head>` 前
-//! 插入 `<link rel="stylesheet" href="./assets/zcode-custom.css">`，并把自定义 CSS
-//! 写到 `out/renderer/assets/zcode-custom.css`。因该 link 在主样式表之后加载，
-//! CSS 源顺序取胜，可覆盖 ZCode 自带样式。
+//! 注入策略：在 `out/renderer/index.html` 的 `</head>` 前插入一个
+//! `<!--ZQ-THEME-BEGIN--> … <!--ZQ-THEME-END-->` 标记块，内含三个外链——
+//! `zq-vars.css`（热文件，每秒被运行时重读）+ `zq-theme.css`（静态结构模板）
+//! 两个 link 与 `zq-effects.js`（运行时脚本）一个 defer script，全部 file://
+//! 指向 zcode-assistant 自身 app data 的 `beautify/theme/` 目录。asar 内不再
+//! 打包任何 CSS/JS/背景图（旧版注入的 asar 内资产在应用时自动清除）。
 //!
-//! 换肤靠覆盖 CSS 变量（ZCode 主样式表用 ~501 个 token）。preset_vars 同时覆盖
-//! 背景/表面/卡片/前景/主色/边框/品牌色/强调色 + 面板/侧栏/头部/输入栏（侧栏与
-//! 输入栏默认引用 neutral-100/200 等浅色 token，仅覆盖 background/-surface 等
-//! 不足以让整页主题一致）；输入栏加 `--color-input`。
+//! 由此获得的热更新能力（ZBar 验证过的架构）：
+//! - 改参数（主题/颜色/字体/透明度/壁纸/滤镜）→ 只重写 `zq-vars.css`，
+//!   zq-effects.js 每秒热重载，约 1 秒生效——见 [`save_params`]，不触碰 asar、
+//!   不关闭 ZCode；
+//! - 「应用美化」只剩两件事：注入/刷新外链块（首次或 ZCode 升级后）+ 重启
+//!   ZCode 让外链被加载；静态模板升级也只需重启（模板版本化落盘）。
 //!
-//! ZCode 的 React 子组件大量用 `bg-neutral-50/100` 等 Tailwind 直写背景色（不
-//! 引用 CSS 变量），CSS 变量无法覆盖字面量。开启毛玻璃 / 背景图时把这些调色板
-//! token 按配置透明度混色覆写（混色源 = 主题/自定义背景色，亮/暗分档避免误伤
-//! 文字色），让 acrylic + 背景图透出；未开毛玻璃 / 背景图时不输出这些覆写。
-//!
-//! **运行时 JS 补丁（zcode-custom.js）**：ZCode 主样式表里大量工具类被 Tailwind
-//! 编译为字面量色值（如 `.bg-background/95 → #fafafae6`、`.dark:bg-[#484A58]`），
-//! CSS 变量覆写与类名枚举都够不着——这是「背景图只在启动屏可见、界面挂载后被
-//! 盖住」的根因。注入的 JS 在 React 挂载后用 MutationObserver 持续把计算样式
-//! 为不透明的背景改写为配置透明度，并给大面块加 backdrop-filter（真磨砂）。
-//! JS 由 CSS 里的 `--zq-alpha` / `--zq-blur` 开关：未开启透明特性时变量缺失，
-//! JS 自动空转。
-//!
-//! 完整性校验已关闭，重打包安全（详见 asar.rs）。
-//!
-//! 毛玻璃：ZCode 在 Windows 上默认启用 acrylic 窗口材质，但被不透明的表面 token
-//! 盖住；这里用 color-mix 混入透明让其透出。
-//! 背景图：复制到 assets/zcode-bg.<ext> 后用 html::before 固定图层承载，期望
-//! 内容区使用引用 CSS 变量的半透明色时透出图。注意：被写死 tailwind 颜色遮
-//! 挡的部分不可穿透（见上）。
-//!
-//! 原则上同时覆盖 `:root,:host` 与 `.dark` 两个作用域，保证亮/暗模式都生效。
+//! 还原与备份策略不变：版本感知备份（ZCode 升级后首次应用自动重建）、还原前
+//! 校验备份版本与当前安装一致（防旧版本 asar 覆盖新版本安装）。
 use crate::zcode::asar;
 use crate::zcode::process;
-use anyhow::{Context, Result};
+use crate::zcode::theme_assets;
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
 const INDEX_HTML: &str = "out/renderer/index.html";
 const ASSETS_DIR: &str = "out/renderer/assets";
-const CUSTOM_CSS_NAME: &str = "zcode-custom.css";
-const CUSTOM_JS_NAME: &str = "zcode-custom.js";
-const INJECT_MARK: &str = "zcode-custom.css"; // 用于判断是否已注入
-const BG_ASSET_PREFIX: &str = "zcode-bg."; // 背景图在 assets/ 内的文件名前缀
+
+/// 注入块起止标记（head 单块，剥离后重插保证幂等）
+pub const INJECT_BEGIN: &str = "<!--ZQ-THEME-BEGIN-->";
+pub const INJECT_END: &str = "<!--ZQ-THEME-END-->";
+
+/// 旧版注入方案的 asar 内资产（应用新方案时从 index.html 与资产表一并清除）
+const LEGACY_CSS: &str = "zcode-custom.css";
+const LEGACY_JS: &str = "zcode-custom.js";
+const LEGACY_BG_PREFIX: &str = "zcode-bg.";
 
 /// 美化配置。持久化到 zcode-assistant app data，不写 ZCode 的 setting.json。
+/// 全部参数走 `save_params` 热生效；`apply` 仅负责把外链块写进 asar（首次 /
+/// ZCode 升级后 / 手动修复）。
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BeautifyConfig {
     /// 是否启用（应用美化）。
@@ -71,15 +63,45 @@ pub struct BeautifyConfig {
     /// 毛玻璃：让主要表面半透明，透出 ZCode 在 Windows 上默认启用的 acrylic 材质。
     #[serde(default)]
     pub acrylic: bool,
-    /// 表面不透明度（0.2–1.0），毛玻璃或背景图启用时生效；越大越实。
+    /// 全局表面/氛围不透明度（0.2–1.0），毛玻璃或壁纸启用时生效；越大越实。
     #[serde(default = "default_surface_opacity")]
     pub surface_opacity: f32,
-    /// 背景图源文件（本地绝对路径），应用时复制进 asar 的 assets/zcode-bg.<ext>。
+    /// 左栏透明度（0–1）；None = 跟随 surface_opacity。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_opacity: Option<f32>,
+    /// 对话区透明度（0–1）；None = 跟随 surface_opacity。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel_opacity: Option<f32>,
+    /// 右栏透明度（0–1）；None = 跟随 surface_opacity。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidebar_right_opacity: Option<f32>,
+    /// 文字描边强度（0–1，0=关）：壁纸过亮/过暗时把前景文字从背景里托出来。
+    #[serde(default)]
+    pub text_shadow: f32,
+    /// 壁纸（本地绝对路径，图片或视频 mp4/webm/mov）；优先于旧字段 bg_image。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallpaper: Option<String>,
+    /// 旧字段（背景图路径），保留兼容旧 config.json 与模板，读取时被 wallpaper 覆盖。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bg_image: Option<String>,
-    /// 背景图图层不透明度（0.1–1.0）。
+    /// 壁纸图层不透明度（0.1–1.0）。
     #[serde(default = "default_bg_image_opacity")]
     pub bg_image_opacity: f32,
+    /// 壁纸亮度滤镜（0.2–2.0，默认 1.1）。
+    #[serde(default = "default_wp_brightness")]
+    pub wp_brightness: f32,
+    /// 壁纸饱和度滤镜（0–2.0，默认 1.4）。
+    #[serde(default = "default_wp_saturate")]
+    pub wp_saturate: f32,
+    /// 壁纸模糊滤镜（0–30px，默认 0）。
+    #[serde(default = "default_wp_blur")]
+    pub wp_blur: f32,
+    /// 压暗遮罩强度（0–0.9）：壁纸过亮时整体压暗保证前景可读。
+    #[serde(default)]
+    pub mask_strength: f32,
+    /// 视频壁纸播放速率（0.25–4.0，默认 1）。
+    #[serde(default = "default_playback_rate")]
+    pub playback_rate: f32,
 }
 
 fn default_surface_opacity() -> f32 {
@@ -87,6 +109,22 @@ fn default_surface_opacity() -> f32 {
 }
 
 fn default_bg_image_opacity() -> f32 {
+    1.0
+}
+
+fn default_wp_brightness() -> f32 {
+    1.1
+}
+
+fn default_wp_saturate() -> f32 {
+    1.4
+}
+
+fn default_wp_blur() -> f32 {
+    0.0
+}
+
+fn default_playback_rate() -> f32 {
     1.0
 }
 
@@ -101,8 +139,18 @@ impl Default for BeautifyConfig {
             primary_color: None,
             acrylic: false,
             surface_opacity: default_surface_opacity(),
+            sidebar_opacity: None,
+            panel_opacity: None,
+            sidebar_right_opacity: None,
+            text_shadow: 0.0,
+            wallpaper: None,
             bg_image: None,
             bg_image_opacity: default_bg_image_opacity(),
+            wp_brightness: default_wp_brightness(),
+            wp_saturate: default_wp_saturate(),
+            wp_blur: default_wp_blur(),
+            mask_strength: 0.0,
+            playback_rate: default_playback_rate(),
         }
     }
 }
@@ -112,7 +160,7 @@ impl Default for BeautifyConfig {
 /// 返回某预设主题的 (CSS 变量名, 值) 列表。覆盖背景 / 背景alt / 表面 / 卡片 /
 /// 前景 / 主色 / 边框 / 品牌色 / 强调色 + 面板 / 侧栏 / 头部 / 输入栏
 /// （后四者默认引用 neutral-100/200 等浅色 token，不覆盖会留下浅色侧栏/输入栏）。
-fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
+pub fn preset_vars(theme: &str) -> Option<Vec<(&'static str, &'static str)>> {
     // 各 token: 背景 / 背景alt / 表面 / 卡片 / 前景 / 主色 / 边框 / 品牌色 / 强调色
     //          / 面板 / 侧栏 / 头部 / 输入栏
     let v = match theme {
@@ -223,500 +271,100 @@ pub fn preset_list() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-fn font_stack(font: &str) -> String {
+/// UI 字体 font-family 栈（theme_assets 渲染 vars 用）。
+pub fn font_stack(font: &str) -> String {
     format!(
         "\"{}\", ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", sans-serif",
         font
     )
 }
 
-fn mono_stack(font: &str) -> String {
+/// 等宽字体 font-family 栈。
+pub fn mono_stack(font: &str) -> String {
     format!(
         "\"{}\", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         font
     )
 }
 
-// ───────────────────────── CSS 生成 ─────────────────────────
-
-/// 允许的背景图扩展名（复制进 asar 后由 CSS 引用）。
-pub const BG_IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif"];
-
-/// 背景图在 assets/ 内的文件名（沿用源扩展名）。非法扩展名返回 None。
-pub fn bg_image_asset_name(path: &Path) -> Option<String> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    BG_IMAGE_EXTS
-        .contains(&ext.as_str())
-        .then(|| format!("zcode-bg.{ext}"))
-}
-
-/// 校验背景图：文件存在 + 扩展名受支持。成功返回 asar 内资源文件名。
-pub fn validate_bg_image(path: &Path) -> Result<String> {
-    if !path.exists() {
-        anyhow::bail!("背景图不存在：{}", path.display());
-    }
-    bg_image_asset_name(path).ok_or_else(|| {
-        anyhow::anyhow!("不支持的背景图格式（支持 png / jpg / jpeg / webp / gif）")
-    })
-}
-
-/// 取预设主题的背景色（供毛玻璃混色用）。
-fn preset_bg_color(theme: &str) -> Option<&'static str> {
-    if theme == "none" {
-        return None;
-    }
-    preset_vars(theme)?
-        .iter()
-        .find(|(k, _)| *k == "--color-background")
-        .map(|(_, v)| *v)
-}
-
-/// 生成某一作用域（亮/暗）的表面半透明覆盖声明。
-/// 基色优先级：自定义/主题背景色（统一染色全部表面 token）> ZCode 默认色板。
-/// 不直接引用自身 token（`--color-background: ... var(--color-background)` 会构成循环），
-/// 而是引用底层调色板 token 或已知的自定义色。
-/// 覆盖面：background + panel/sidebar/header/input + card/popover/secondary——
-/// 后三者（卡片/弹层/次级面）缺了会导致聊天气泡卡片、弹窗、输入栏仍为实心，
-/// 把背景图 / acrylic 盖住（真机 styles-*.css 实测这些 token 均被 bg 工具类引用）。
-/// 注意：**不能覆盖 `--color-surface`**——它是调色板混色的锚点且本身近透明，
-/// 覆盖会构成循环引用导致整链失效。
-fn frosted_block(light: bool, base: Option<&str>, alpha_pct: i32) -> String {
-    let mix = |c: &str| format!("color-mix(in oklab, {} {}%, transparent)", c, alpha_pct);
-    // ZCode 默认：亮 bg=neutral-50、panel/sidebar/header/card=neutral-100；
-    //            暗 bg/card/header=neutral-900、sidebar=neutral-950。
-    let (bg, side, head) = match (light, base) {
-        (_, Some(c)) => (mix(c), mix(c), mix(c)),
-        (true, None) => (
-            mix("var(--color-neutral-50)"),
-            mix("var(--color-neutral-100)"),
-            mix("var(--color-neutral-100)"),
-        ),
-        (false, None) => (
-            mix("var(--color-neutral-900)"),
-            mix("var(--color-neutral-950)"),
-            mix("var(--color-neutral-900)"),
-        ),
-    };
-    format!(
-        "  --color-background: {bg};\n  --color-card: {side};\n  --color-popover: {side};\n  --color-secondary: {head};\n  --color-panel: {side};\n  --color-sidebar: {side};\n  --color-header: {head};\n  --color-input: {head};\n"
-    )
-}
-
-/// 根据配置生成 zcode-custom.css 内容。
-pub fn generate_css(cfg: &BeautifyConfig) -> String {
-    let mut vars: Vec<(String, String)> = Vec::new();
-
-    if let Some(t) = &cfg.theme {
-        if t == "none" {
-            // 显式不应用主题
-        } else if let Some(preset) = preset_vars(t) {
-            for (k, v) in preset {
-                vars.push((k.to_string(), v.to_string()));
-            }
-        }
-    }
-    if let Some(f) = &cfg.ui_font {
-        vars.push(("--font-sans".to_string(), font_stack(f)));
-    }
-    if let Some(f) = &cfg.mono_font {
-        vars.push(("--font-mono".to_string(), mono_stack(f)));
-    }
-    if let Some(c) = &cfg.bg_color {
-        vars.push(("--color-background".to_string(), c.clone()));
-    }
-    if let Some(c) = &cfg.primary_color {
-        vars.push(("--color-primary".to_string(), c.clone()));
-    }
-
-    // 毛玻璃或背景图任一启用时，都需要让表面半透明（否则亚克力/背景图被不透明底色盖住）
-    let translucent = cfg.acrylic || cfg.bg_image.is_some();
-    let bg_asset = cfg
-        .bg_image
-        .as_deref()
-        .map(Path::new)
-        .and_then(bg_image_asset_name);
-
-    if vars.is_empty() && !translucent && bg_asset.is_none() {
-        return "/* zcode-custom.css：当前无生效配置 */\n".to_string();
-    }
-
-    let mut s = String::new();
-    s.push_str("/* zcode-custom.css — 由 zcode-assistant 生成，请勿手动编辑。*/\n");
-    s.push_str("/* 同时覆盖 :root,:host 与 .dark，保证亮/暗模式都生效。*/\n");
-
-    if !vars.is_empty() {
-        s.push_str(":root, :host {\n");
-        for (k, v) in &vars {
-            s.push_str(&format!("  {}: {};\n", k, v));
-        }
-        s.push_str("}\n");
-        s.push_str(".dark {\n");
-        for (k, v) in &vars {
-            s.push_str(&format!("  {}: {};\n", k, v));
-        }
-        s.push_str("}\n");
-    }
-
-    if translucent {
-        // 毛玻璃：ZCode 在 Windows 上默认启用 acrylic 窗口材质，但被不透明的
-        // --color-background 等表面 token 盖住；这里按 surface_opacity 混入透明。
-        // 注意：必须排在上方主题/自定义色块之后，才能覆盖它们设置的 --color-background。
-        let alpha = (cfg.surface_opacity.clamp(0.2, 1.0) * 100.0).round() as i32;
-        let base = cfg.bg_color.as_deref().or_else(|| {
-            cfg.theme
-                .as_deref()
-                .and_then(preset_bg_color)
-        });
-        s.push_str("/* 毛玻璃：主要表面半透明，透出 Windows acrylic / 背景图。*/\n");
-        s.push_str(":root, :host {\n");
-        s.push_str(&frosted_block(true, base, alpha));
-        s.push_str("}\n");
-        s.push_str(".dark {\n");
-        s.push_str(&frosted_block(false, base, alpha));
-        s.push_str("}\n");
-
-        // 运行时 JS 补丁开关（见 patcher_js）：主样式表里大量工具类被 Tailwind
-        // 编译为字面量色值，CSS 层够不着，只能由注入的 zcode-custom.js 在运行时
-        // 改写。JS 检测到 --zq-alpha 存在且 <1 才启动；关闭透明特性后变量缺失，
-        // JS 自动空转，不碰任何元素。
-        s.push_str("/* 运行时补丁开关：zcode-custom.js 据此启动。*/\n");
-        s.push_str(":root, :host {\n");
-        s.push_str(&format!(
-            "  --zq-alpha: {:.2};\n  --zq-blur: 22px;\n}}\n",
-            cfg.surface_opacity.clamp(0.2, 1.0)
-        ));
-
-        // ZCode 主样式表的 .bg-* 工具类全部引用 var(--color-neutral-*) 等
-        // 调色板 token（Tailwind v4 模式），直接覆盖这些 token 为半透明主题色，
-        // 即可让所有直写容器背景统一透出 acrylic / 背景图（比逐类名覆写更全面）。
-        // **按模式分档覆盖**，避免误伤文字色：亮色模式下浅档（50–300）是背景、
-        // 文字用深档（700 等）；暗色模式相反。--color-white 同理只在亮色覆盖
-        // （暗色的 text-white 不动）。
-        // 混色源：优先主题/自定义背景色（整页统一色调）；否则退回 ZCode 的
-        // --color-surface——但真机实测该 token 本身是近透明色（oklab … / 0.03），
-        // 再混一次 transparent 结果几乎全透明，surface_opacity 形同虚设，
-        // 因此无 base 时才用它兜底。
-        let mix_src = base.unwrap_or("var(--color-surface)");
-        let mix_sur = format!("color-mix(in oklab, {mix_src} {alpha}%, transparent)");
-        s.push_str("/* 调色板 token 半透明覆写（.bg-* 工具类均引用；按亮/暗分档避免误伤文字色）。*/\n");
-        s.push_str(":root:not(.dark), :host:not(.dark) {\n");
-        for tok in [
-            "--color-neutral-50",
-            "--color-neutral-100",
-            "--color-neutral-200",
-            "--color-neutral-300",
-            "--color-zinc-50",
-            "--color-zinc-100",
-            "--color-zinc-200",
-            "--color-zinc-300",
-            "--color-slate-50",
-            "--color-slate-100",
-            "--color-slate-200",
-            "--color-gray-50",
-            "--color-gray-100",
-            "--color-gray-200",
-            "--color-white",
-        ] {
-            s.push_str(&format!("  {tok}: {mix_sur};\n"));
-        }
-        s.push_str("}\n.dark {\n");
-        for tok in [
-            "--color-neutral-800",
-            "--color-neutral-900",
-            "--color-neutral-950",
-            "--color-zinc-800",
-            "--color-zinc-900",
-            "--color-zinc-950",
-            "--color-slate-800",
-            "--color-slate-900",
-            "--color-slate-950",
-            "--color-gray-800",
-            "--color-gray-900",
-            "--color-gray-950",
-        ] {
-            s.push_str(&format!("  {tok}: {mix_sur};\n"));
-        }
-        s.push_str("}\n");
-
-        // 类名级覆写作双保险（防御个别工具类未走 token 引用的版本差异）
-        s.push_str(
-            "/* 直写 tailwind 容器背景：覆写为半透明主题色，让 acrylic / 背景图透出。*/\n",
-        );
-        s.push_str(
-            "html, body, #root { background: transparent !important; }\n",
-        );
-        s.push_str(&format!(
-            ".bg-neutral-50, .bg-neutral-100, .bg-neutral-200, .bg-zinc-50, .bg-zinc-100, .bg-zinc-200, .bg-slate-50, .bg-slate-100, .bg-slate-200, .bg-gray-50, .bg-gray-100, .bg-white {{ background-color: {mix_sur} !important; }}\n",
-        ));
-        s.push_str(&format!(
-            ".dark .bg-neutral-900, .dark .bg-neutral-950, .dark .bg-neutral-800, .dark .bg-zinc-900, .dark .bg-zinc-950, .dark .bg-slate-900, .dark .bg-slate-950, .dark .bg-gray-900, .dark .bg-gray-950 {{ background-color: {mix_sur} !important; }}\n",
-        ));
-    }
-
-    if let Some(name) = &bg_asset {
-        // 背景图层：固定在内容之下（z-index:-1），透过上方半透明表面显现。
-        // 直写 tailwind 字面量色的容器由运行时 zcode-custom.js 改透明（见上），
-        // CSS 层只负责变量引用类的表面。
-        let op = cfg.bg_image_opacity.clamp(0.1, 1.0);
-        s.push_str("/* 背景图层：固定在内容之下，透过上方半透明表面显现。*/\n");
-        s.push_str(&format!(
-            "html::before {{ content: \"\"; position: fixed; inset: 0; z-index: -1; background: url(\"./{name}\") center / cover no-repeat; opacity: {op:.2}; pointer-events: none; }}\n"
-        ));
-        // 确保 html/body 透明不挡住图层（ZCode 已把这两层 bg 设 transparent，但
-        // 防御性重写，避免 ZCode 版本变更时出现 opaque html 把图层盖死）
-        s.push_str("html, body { background: transparent !important; }\n");
-    }
-    s
-}
-
-/// 一段非常明显的测试 CSS（红色背景），用于真机验证注入链路是否生效。
-#[allow(dead_code)]
-pub fn test_css() -> &'static str {
-    "\
-/* === zcode-assistant 注入测试：成功则界面应明显偏红 === */
-:root, :host, .dark {
-  --color-background: #b71c1c;
-  --color-background-alt: #c62828;
-  --color-surface: #d32f2f;
-  --color-card: #e53935;
-  --color-surface-hover: #ef5350;
-  --color-primary: #ffebee;
-  --color-foreground: #ffebee;
-  --color-border: #ef9a9a;
-  --color-brand: #ffcdd2;
-}
-"
-}
-
-/// 运行时补丁脚本（注入为 assets/zcode-custom.js）。
-///
-/// 解决 CSS 层够不着的问题：ZCode 主样式表把大量工具类编译为字面量色值
-/// （`.bg-background/95 → #fafafae6`、`.dark:bg-[#484A58]`），CSS 变量覆写与
-/// 类名枚举都无法触达。本脚本在 React 挂载前后持续工作：
-///
-/// 1. **开关**：读取 CSS 变量 `--zq-alpha`，缺失或 ≥1（未开透明特性）立即退出，
-///    不碰任何元素——因此脚本可以无条件注入。
-/// 2. **透明化**：MutationObserver 监听 DOM 变化（rAF 去抖，扫描期间断开观察
-///    避免自触发循环），把计算样式为不透明（α≥0.99）的 backgroundColor 改写为
-///    同色 + 目标透明度。`data-zq-bg` 标记已处理元素防重复；React 重渲染只会
-///    改 class，内联样式与 dataset 保留，不会被冲掉。
-/// 3. **真磨砂**：在已透明化的大面块（≥12% 视口、≥40px、视口内）里挑最大的
-///    ≤6 块加 `backdrop-filter: blur()`，跳过已有模糊祖先（避免叠加卡顿）。
-/// 4. **排除**：#loading 启动屏（保持启动观感）、pre/code（代码可读性）、
-///    svg/img/video/canvas/iframe/picture（媒体元素）。
-///
-/// 注意保持 ES5 兼容写法（var / function），Electron 旧内核也能跑。
-fn patcher_js() -> &'static str {
-    r#"/*! zcode-custom.js — 由 zcode-assistant 生成，请勿手动编辑。
- * 运行时表面透明 + backdrop-filter 磨砂补丁。开关：CSS 变量 --zq-alpha（0<x<1 启用）。
- */
-(function () {
-  "use strict";
-  if (window.__ZQ_BEAUTIFY__) return;
-  window.__ZQ_BEAUTIFY__ = true;
-
-  var cs0 = getComputedStyle(document.documentElement);
-  var ALPHA = parseFloat(cs0.getPropertyValue("--zq-alpha"));
-  if (!isFinite(ALPHA) || ALPHA <= 0 || ALPHA >= 1) return; // 未开启透明特性：空转
-  var BLUR = parseFloat(cs0.getPropertyValue("--zq-blur"));
-  if (!isFinite(BLUR) || BLUR <= 0) BLUR = 22;
-
-  var MAX_BLUR = 6;
-  var MIN_BLUR_SIZE = 40;
-  var MIN_BLUR_AREA = 0.12; // 占视口面积比例
-  var blurred = [];
-
-  function parseColor(s) {
-    var m = /^rgba?\(([^)]+)\)$/i.exec(s);
-    if (m) {
-      var p = m[1].split(/[,\s/]+/).filter(Boolean).map(Number);
-      if (p.length >= 3 && p.every(isFinite)) {
-        return { r: Math.round(p[0]), g: Math.round(p[1]), b: Math.round(p[2]), a: p.length > 3 ? p[3] : 1 };
-      }
-      return null;
-    }
-    m = /^color\(\s*srgb\s+([0-9.]+)\s+([0-9.]+)\s+([0-9.]+)(?:\s*\/\s*([0-9.]+))?\s*\)$/i.exec(s);
-    if (m) {
-      return { r: Math.round(+m[1] * 255), g: Math.round(+m[2] * 255), b: Math.round(+m[3] * 255), a: m[4] === undefined ? 1 : +m[4] };
-    }
-    return null;
-  }
-
-  function excluded(el) {
-    if (el.id === "loading") return true;
-    var t = el.tagName;
-    if (t === "PRE" || t === "CODE" || t === "SVG" || t === "IMG" || t === "VIDEO" || t === "CANVAS" || t === "IFRAME" || t === "PICTURE") return true;
-    if (el.closest && el.closest("pre,code,#loading")) return true;
-    return false;
-  }
-
-  function patch(el) {
-    if (el.dataset && el.dataset.zqBg) return; // 已处理
-    if (excluded(el)) return;
-    var bg;
-    try { bg = getComputedStyle(el).backgroundColor; } catch (e) { return; }
-    var c = bg ? parseColor(bg) : null;
-    if (!c || c.a < 0.99) return; // 已透明 / 渐变无底色 / 无法解析：跳过
-    el.style.backgroundColor = "rgba(" + c.r + "," + c.g + "," + c.b + "," + ALPHA + ")";
-    if (el.dataset) el.dataset.zqBg = "1";
-  }
-
-  function scan(root) {
-    if (!root || root.nodeType !== 1 || !root.querySelectorAll) return;
-    patch(root);
-    var list = root.querySelectorAll("*");
-    for (var i = 0; i < list.length; i++) patch(list[i]);
-    blurPass();
-  }
-
-  function hasBlurredAncestor(el) {
-    for (var p = el.parentElement; p; p = p.parentElement) {
-      if (p.dataset && p.dataset.zqBlur) return true;
-    }
-    return false;
-  }
-
-  function blurPass() {
-    for (var i = 0; i < blurred.length; i++) {
-      var b = blurred[i];
-      b.style.backdropFilter = "";
-      b.style.webkitBackdropFilter = "";
-      if (b.dataset) delete b.dataset.zqBlur;
-    }
-    blurred = [];
-    var vw = window.innerWidth, vh = window.innerHeight;
-    if (!vw || !vh) return;
-    var marked = document.querySelectorAll('[data-zq-bg="1"]');
-    var cand = [];
-    for (var i = 0; i < marked.length; i++) {
-      var el = marked[i];
-      var r = el.getBoundingClientRect();
-      if (r.width < MIN_BLUR_SIZE || r.height < MIN_BLUR_SIZE) continue;
-      if (r.width * r.height < vw * vh * MIN_BLUR_AREA) continue;
-      if (r.bottom <= 0 || r.top >= vh || r.right <= 0 || r.left >= vw) continue;
-      cand.push({ el: el, area: r.width * r.height });
-    }
-    cand.sort(function (a, b) { return b.area - a.area; });
-    for (var j = 0; j < cand.length && blurred.length < MAX_BLUR; j++) {
-      var el = cand[j].el;
-      if (hasBlurredAncestor(el)) continue;
-      var v = "blur(" + BLUR + "px)";
-      el.style.backdropFilter = v;
-      el.style.webkitBackdropFilter = v;
-      if (el.dataset) el.dataset.zqBlur = "1";
-      blurred.push(el);
-    }
-  }
-
-  var obs = null;
-  var scheduled = false;
-  function scheduleScan() {
-    if (scheduled) return;
-    scheduled = true;
-    requestAnimationFrame(function () {
-      scheduled = false;
-      if (obs) obs.disconnect(); // 扫描期间断开，避免自身样式写入触发死循环
-      try { scan(document.body); } finally { if (obs) obs.observe(document.documentElement, OBS_OPTS); }
-    });
-  }
-  var OBS_OPTS = { childList: true, subtree: true, attributes: true, attributeFilter: ["class", "style"] };
-  function start() {
-    obs = new MutationObserver(scheduleScan);
-    scheduleScan();
-    obs.observe(document.documentElement, OBS_OPTS);
-  }
-  if (document.body) start();
-  else document.addEventListener("DOMContentLoaded", start, { once: true });
-})();
-"#
-}
-
-
-
 // ───────────────────────── 注入 ─────────────────────────
 
-/// 当前 app.asar 是否已注入美化（index.html 含注入标记）。
+/// 当前 app.asar 是否已注入新方案外链块（index.html 含块标记）。
+/// 旧版方案（asar 内打包 css/js）不再视为已注入——重新「应用美化」即自动升级。
 pub fn is_installed(asar: &Path) -> bool {
     asar::read_file(asar, INDEX_HTML)
-        .map(|b| String::from_utf8_lossy(&b).contains(INJECT_MARK))
+        .map(|b| String::from_utf8_lossy(&b).contains(INJECT_BEGIN))
         .unwrap_or(false)
 }
 
-/// 在 index.html 的 </head> 前插入 CSS link 与 JS script 标签。
-/// 幂等：两个标签分别判断是否已存在，只补缺失的那个——因此对「已注入过 CSS
-/// 的旧版 asar」也能原地升级补上 script 标签。
-fn inject_html(html: &str) -> Result<String> {
-    let css_link = format!(
-        "    <link rel=\"stylesheet\" href=\"./assets/{CUSTOM_CSS_NAME}\">\n"
-    );
-    let js_tag = format!(
-        "    <script defer src=\"./assets/{CUSTOM_JS_NAME}\"></script>\n"
-    );
-    if html.contains(&css_link) && html.contains(&js_tag) {
-        return Ok(html.to_string()); // 两个标签都在
+/// 构建注入块：三个 file:// 外链（vars / theme / effects），指向主题目录。
+fn inject_block() -> Result<String> {
+    let (vars, theme, effects) = theme_assets::link_urls()?;
+    Ok(format!(
+        "{INJECT_BEGIN}\n    <link rel=\"stylesheet\" data-zq-vars href=\"{vars}\">\n    <link rel=\"stylesheet\" href=\"{theme}\">\n    <script defer src=\"{effects}\"></script>\n    {INJECT_END}\n"
+    ))
+}
+
+/// 剥离全部既有注入块（幂等重装的基础）。
+fn strip_inject_blocks(html: &str) -> String {
+    let mut out = html.to_string();
+    while let Some(b) = out.find(INJECT_BEGIN) {
+        match out[b..].find(INJECT_END) {
+            Some(e) => {
+                let end = b + e + INJECT_END.len();
+                out.replace_range(b..end, "");
+            }
+            None => {
+                // 标记残缺（有 BEGIN 无 END，写盘截断等极端场景）：
+                // 只剥 BEGIN 标记本身，其余内容保留（随后正常走锚点插入）
+                out.replace_range(b..b + INJECT_BEGIN.len(), "");
+                break;
+            }
+        }
     }
-    let Some(idx) = html.find("</head>") else {
-        return Err(anyhow::anyhow!("index.html 未找到 </head> 注入锚点"));
+    out
+}
+
+/// 在 index.html 的 `</head>` 前插入注入块。幂等：先剥离旧块与旧版方案的
+/// 两个 asar 内资产标签，再插入新块——旧版 asar 应用一次即完成升级。
+fn inject_html(html: &str, block: &str) -> Result<String> {
+    let stripped = strip_inject_blocks(html);
+    // 旧版注入的两个标签按当年写出的精确格式剥离（见旧版 inject_html）
+    let legacy_css_tag = format!("    <link rel=\"stylesheet\" href=\"./assets/{LEGACY_CSS}\">\n");
+    let legacy_js_tag = format!("    <script defer src=\"./assets/{LEGACY_JS}\"></script>\n");
+    let stripped = stripped.replace(&legacy_css_tag, "").replace(&legacy_js_tag, "");
+    let Some(idx) = stripped.find("</head>") else {
+        return Err(anyhow!("index.html 未找到 </head> 注入锚点"));
     };
-    let (before, after) = html.split_at(idx);
-    let mut new_html = String::with_capacity(html.len() + css_link.len() + js_tag.len());
-    new_html.push_str(before);
-    if !html.contains(&css_link) {
-        new_html.push_str(&css_link);
-    }
-    if !html.contains(&js_tag) {
-        new_html.push_str(&js_tag);
-    }
-    new_html.push_str(after);
+    let mut new_html = String::with_capacity(stripped.len() + block.len());
+    new_html.push_str(&stripped[..idx]);
+    new_html.push_str(block);
+    new_html.push_str(&stripped[idx..]);
     Ok(new_html)
 }
 
 /// 在内存中构建 asar 原地补丁的修改集（不解包、不落盘）：
-/// - index.html 注入 link/script 标签；
-/// - 写 assets/zcode-custom.css 与 assets/zcode-custom.js（JS 内容为常量且自带
-///   开关——无 --zq-alpha 时空转，无条件写入无害）；
-/// - 背景图：先移除旧 zcode-bg.* 条目（避免配置移除后残留、换图后累积），
-///   再写入新的（若有）。
-fn build_mods(
-    asar: &Path,
-    css_content: &str,
-    bg_image_src: Option<&Path>,
-) -> Result<Vec<(String, asar::FileMod)>> {
+/// - index.html 注入外链块；
+/// - 删除旧版方案打入 asar 的资产（zcode-custom.css / zcode-custom.js / zcode-bg.*）。
+fn build_mods(asar_path: &Path) -> Result<Vec<(String, asar::FileMod)>> {
     let mut mods: Vec<(String, asar::FileMod)> = Vec::new();
 
-    let html = asar::read_file(asar, INDEX_HTML)
+    let html = asar::read_file(asar_path, INDEX_HTML)
         .with_context(|| format!("读取 {} 失败", INDEX_HTML))?;
-    let new_html = inject_html(&String::from_utf8_lossy(&html))?;
+    let block = inject_block()?;
+    let new_html = inject_html(&String::from_utf8_lossy(&html), &block)?;
     mods.push((
         INDEX_HTML.to_string(),
         asar::FileMod::Write(new_html.into_bytes()),
     ));
 
-    mods.push((
-        format!("{ASSETS_DIR}/{CUSTOM_CSS_NAME}"),
-        asar::FileMod::Write(css_content.as_bytes().to_vec()),
-    ));
-    mods.push((
-        format!("{ASSETS_DIR}/{CUSTOM_JS_NAME}"),
-        asar::FileMod::Write(patcher_js().as_bytes().to_vec()),
-    ));
-
-    // 清理上一次注入的背景图（assets 目录不存在则跳过）
-    if let Ok(names) = asar::list_dir(asar, ASSETS_DIR) {
+    // 清理旧版注入的 asar 内资产（不存在则跳过）
+    if let Ok(names) = asar::list_dir(asar_path, ASSETS_DIR) {
         for name in names {
-            if name.starts_with(BG_ASSET_PREFIX) {
+            if name == LEGACY_CSS || name == LEGACY_JS || name.starts_with(LEGACY_BG_PREFIX) {
                 mods.push((format!("{ASSETS_DIR}/{name}"), asar::FileMod::Remove));
             }
         }
-    }
-    if let Some(src) = bg_image_src {
-        let asset = validate_bg_image(src)?;
-        let bytes =
-            fs::read(src).with_context(|| format!("读取背景图失败：{}", src.display()))?;
-        mods.push((
-            format!("{ASSETS_DIR}/{asset}"),
-            asar::FileMod::Write(bytes),
-        ));
     }
     Ok(mods)
 }
@@ -785,34 +433,43 @@ pub fn write_templates(list: &[BeautifyTemplate]) -> Result<()> {
     Ok(())
 }
 
-// ───────────────────────── 高层 apply / restore ─────────────────────────
+// ───────────────────────── 高层 apply / save_params / restore ─────────────────────────
 
-/// 完整应用美化（快速路径）：
-/// 版本感知备份 → 内存构建修改集 → kill ZCode 解锁 → asar 原地补丁 → 原子替换。
-/// 不再整包解包/重打包：284MB 的 app.asar 只做一次顺序拷贝 + 少量哈希，秒级完成。
+/// 校验并规整壁纸源（apply 与 save_params 共用的前置检查）。
+fn validated_wallpaper(cfg: &BeautifyConfig) -> Result<Option<String>> {
+    let src = theme_assets::wallpaper_source(cfg);
+    if let Some(p) = &src {
+        theme_assets::validate_wallpaper(Path::new(p))?;
+    }
+    Ok(src)
+}
+
+/// 完整应用美化（把外链注入块写进 app.asar，秒级原地补丁）：
+/// 壁纸预校验 → 版本感知备份 → 主题资产落盘（模板 + vars + 壁纸副本）→
+/// kill ZCode 解锁 → asar 原地补丁 → 原子替换。
 /// 不负责重启 ZCode（由命令层 emit restart 事件，前端走全局 RestartDialog）。
 pub fn apply(cfg: &BeautifyConfig) -> Result<()> {
-    // 0. 背景图预校验（在关闭 ZCode 之前尽早失败）
-    let bg_src = cfg.bg_image.as_deref().map(Path::new);
-    if let Some(p) = bg_src {
-        validate_bg_image(p)?;
-    }
-
-    let asar_path = asar::asar_path()?;
-    let resources_dir = asar_path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("app.asar 无父目录"))?;
+    let wp_src = validated_wallpaper(cfg)?;
 
     // 1. 版本感知备份（ZCode 升级后首次应用会用官方包自动重建）
     ensure_backup_versioned()?;
 
-    // 2. 构建修改集（读 asar 内 index.html + 生成 CSS/JS，全部在内存完成）
-    let mods = build_mods(&asar_path, &generate_css(cfg), bg_src)?;
+    // 2. 主题资产落盘（先于 asar 补丁：任何失败都不触碰 asar）
+    theme_assets::ensure_static_templates()?;
+    let asset = theme_assets::sync_wallpaper(wp_src.as_deref().map(Path::new))?;
+    theme_assets::write_vars_css(&theme_assets::render_vars_css(cfg, asset.as_deref()))?;
 
-    // 3. 关闭 ZCode，释放 app.asar 文件锁（放在修改集构建之后，缩短停机窗口）
+    // 3. 构建修改集（读 asar 内 index.html + 注入块，全部在内存完成）
+    let asar_path = asar::asar_path()?;
+    let resources_dir = asar_path
+        .parent()
+        .ok_or_else(|| anyhow!("app.asar 无父目录"))?;
+    let mods = build_mods(&asar_path)?;
+
+    // 4. 关闭 ZCode，释放 app.asar 文件锁（放在修改集构建之后，缩短停机窗口）
     let _ = process::kill_zcode();
 
-    // 4. 原地补丁到同目录临时文件（同卷，便于原子 rename）→ 原子替换
+    // 5. 原地补丁到同目录临时文件（同卷，便于原子 rename）→ 原子替换
     let new_asar = resources_dir.join("app.asar.new");
     asar::patch(&asar_path, &mods, &new_asar)?;
     fs::rename(&new_asar, &asar_path)
@@ -820,17 +477,15 @@ pub fn apply(cfg: &BeautifyConfig) -> Result<()> {
     Ok(())
 }
 
-/// 用测试 CSS 应用到真实 ZCode（仅用于真机验证）。
-#[allow(dead_code)]
-pub fn apply_test_css() -> Result<()> {
-    let asar_path = asar::asar_path()?;
-    let resources_dir = asar_path.parent().unwrap();
-    ensure_backup_versioned()?;
-    let mods = build_mods(&asar_path, test_css(), None)?;
-    let _ = process::kill_zcode();
-    let new_asar = resources_dir.join("app.asar.new");
-    asar::patch(&asar_path, &mods, &new_asar)?;
-    fs::rename(&new_asar, &asar_path)?;
+/// 热保存参数（本方案的日常路径）：只落盘主题资产（zq-vars.css + 壁纸副本），
+/// **完全不触碰 app.asar、不关闭 ZCode**。已注入的前提下 zq-effects.js 每秒
+/// 热重载 zq-vars.css，参数约 1 秒生效；未注入时仅持久化，待 apply 后生效。
+pub fn save_params(cfg: &BeautifyConfig) -> Result<()> {
+    let wp_src = validated_wallpaper(cfg)?;
+    theme_assets::ensure_static_templates()?;
+    let asset = theme_assets::sync_wallpaper(wp_src.as_deref().map(Path::new))?;
+    theme_assets::write_vars_css(&theme_assets::render_vars_css(cfg, asset.as_deref()))?;
+    write_config(cfg)?;
     Ok(())
 }
 
@@ -890,114 +545,110 @@ pub fn restore() -> Result<()> {
 mod tests {
     use super::*;
 
-    /// 离线验证 build_mods + patch 全链路（合成 asar，不触碰真实 ZCode）：
-    /// CSS/JS 写入、背景图替换、旧背景图清理、link + script 注入、幂等与
-    /// 「已注入过 CSS 的旧版 asar」升级补 script。
+    /// 合成 asar（含旧版注入残留），build_mods + patch 全链路离线验证：
+    /// 外链块注入（file:/// 链接 + 标记）、旧版 css/js 标签剥离、旧版资产
+    /// （zcode-custom.css/js、zcode-bg.*）条目删除、幂等重装。
     #[test]
     fn build_mods_and_patch_offline() {
         let work = std::env::temp_dir().join("zcode_beautify_patch_test");
         let _ = fs::remove_dir_all(&work);
 
-        // 合成 asar：index.html + assets（含上一次注入遗留的旧背景图 zcode-bg.jpg）
+        // 合成 asar：index.html（带旧版注入标签）+ assets（旧资产 + 旧背景图）
         let src_dir = work.join("src");
         fs::create_dir_all(src_dir.join(ASSETS_DIR)).unwrap();
-        fs::write(
-            src_dir.join(INDEX_HTML),
-            "<!doctype html><html><head><title>ZCode</title></head><body><div id=\"root\"></div></body></html>",
-        )
-        .unwrap();
-        fs::write(src_dir.join(ASSETS_DIR).join("zcode-bg.jpg"), b"old").unwrap();
+        let old_html = format!(
+            "<!doctype html><html><head><title>ZCode</title>{}{}</head><body><div id=\"root\"></div></body></html>",
+            format!("    <link rel=\"stylesheet\" href=\"./assets/{LEGACY_CSS}\">\n"),
+            format!("    <script defer src=\"./assets/{LEGACY_JS}\"></script>\n"),
+        );
+        fs::write(src_dir.join(INDEX_HTML), old_html).unwrap();
+        fs::write(src_dir.join(ASSETS_DIR).join(LEGACY_CSS), b"old css").unwrap();
+        fs::write(src_dir.join(ASSETS_DIR).join(LEGACY_JS), b"old js").unwrap();
+        fs::write(src_dir.join(ASSETS_DIR).join("zcode-bg.jpg"), b"old bg").unwrap();
         fs::write(src_dir.join(ASSETS_DIR).join("styles-abc.css"), b"").unwrap();
         let asar = work.join("app.asar");
         asar::pack(&src_dir, &asar, &std::collections::HashSet::new()).unwrap();
 
-        // 模拟背景图源文件
-        let img_src = work.join("wallpaper.png");
-        fs::write(&img_src, b"\x89PNG fake bytes").unwrap();
-
-        let mods = build_mods(&asar, "/* test css */", Some(img_src.as_path())).unwrap();
+        // 第一次应用
+        let mods = build_mods(&asar).unwrap();
         let patched = work.join("patched.asar");
         asar::patch(&asar, &mods, &patched).unwrap();
 
         let read = |p: &str, a: &std::path::Path| {
             String::from_utf8_lossy(&asar::read_file(a, p).unwrap()).to_string()
         };
-        assert_eq!(read("out/renderer/assets/zcode-custom.css", &patched), "/* test css */");
-        assert!(
-            asar::read_file(&patched, "out/renderer/assets/zcode-custom.js").is_ok(),
-            "运行时补丁脚本未写入"
-        );
-        assert_eq!(
-            asar::read_file(&patched, "out/renderer/assets/zcode-bg.png").unwrap(),
-            b"\x89PNG fake bytes".to_vec(),
-            "背景图未按源扩展名写入"
-        );
-        assert!(
-            asar::read_file(&patched, "out/renderer/assets/zcode-bg.jpg").is_err(),
-            "旧背景图条目未清理"
-        );
+        assert!(is_installed(&patched), "注入标记未写入");
         let html = read(INDEX_HTML, &patched);
-        assert!(html.contains(r#"<link rel="stylesheet" href="./assets/zcode-custom.css">"#));
+        assert!(html.contains("file:///"), "外链应为 file:// URL：{html}");
+        assert!(html.contains("zq-vars.css"), "变量外链缺失");
+        assert!(html.contains("zq-theme.css"), "主题外链缺失");
+        assert!(html.contains("zq-effects.js"), "运行时外链缺失");
+        assert!(html.contains("data-zq-vars"), "热重载定位标记缺失");
         assert!(
-            html.contains(r#"<script defer src="./assets/zcode-custom.js"></script>"#),
-            "script 标签未注入"
+            html.find(INJECT_BEGIN).unwrap() < html.find("</head>").unwrap(),
+            "注入块应在 </head> 之前"
+        );
+        assert!(!html.contains(LEGACY_CSS), "旧版 css 标签未剥离：{html}");
+        assert!(!html.contains(LEGACY_JS), "旧版 js 标签未剥离：{html}");
+        assert!(
+            asar::read_file(&patched, &format!("{ASSETS_DIR}/{LEGACY_CSS}")).is_err(),
+            "旧版 css 资产条目未删除"
         );
         assert!(
-            html.find("zcode-custom.css").unwrap() < html.find("</head>").unwrap(),
-            "link 未注入到 </head> 之前"
+            asar::read_file(&patched, &format!("{ASSETS_DIR}/{LEGACY_JS}")).is_err(),
+            "旧版 js 资产条目未删除"
+        );
+        assert!(
+            asar::read_file(&patched, &format!("{ASSETS_DIR}/zcode-bg.jpg")).is_err(),
+            "旧背景图条目未删除"
+        );
+        assert!(
+            asar::read_file(&patched, &format!("{ASSETS_DIR}/styles-abc.css")).is_ok(),
+            "ZCode 自有资产不应被误删"
         );
 
-        // 幂等 + 移除背景图场景：对已 patch 的包再次构建（无背景图）
-        let mods2 = build_mods(&patched, "/* test css 2 */", None).unwrap();
+        // 幂等：对已注入包重复 build_mods + patch，外链块不重复
+        let mods2 = build_mods(&patched).unwrap();
         let patched2 = work.join("patched2.asar");
         asar::patch(&patched, &mods2, &patched2).unwrap();
-        let html = read(INDEX_HTML, &patched2);
-        assert_eq!(html.matches("zcode-custom.css").count(), 1, "link 重复注入");
-        assert_eq!(html.matches("zcode-custom.js").count(), 1, "script 重复注入");
-        assert!(
-            asar::read_file(&patched2, "out/renderer/assets/zcode-bg.png").is_err(),
-            "移除背景图后未清理"
-        );
+        let html2 = read(INDEX_HTML, &patched2);
         assert_eq!(
-            read("out/renderer/assets/zcode-custom.css", &patched2),
-            "/* test css 2 */"
-        );
-
-        // 升级路径：构造「只有 CSS link 的旧版 asar」，build_mods 应补上 script
-        let old_html = html.replace(r#"<script defer src="./assets/zcode-custom.js"></script>"#, "");
-        let mods_old = vec![(
-            INDEX_HTML.to_string(),
-            asar::FileMod::Write(old_html.into_bytes()),
-        )];
-        let old_asar = work.join("old.asar");
-        asar::patch(&patched2, &mods_old, &old_asar).unwrap();
-        let mods3 = build_mods(&old_asar, "/* test css 3 */", None).unwrap();
-        let patched3 = work.join("patched3.asar");
-        asar::patch(&old_asar, &mods3, &patched3).unwrap();
-        let html = read(INDEX_HTML, &patched3);
-        assert_eq!(html.matches("zcode-custom.css").count(), 1);
-        assert_eq!(
-            html.matches("zcode-custom.js").count(),
+            html2.matches(INJECT_BEGIN).count(),
             1,
-            "旧版 asar 未补上 script 标签"
+            "注入块重复：{html2}"
         );
+        assert_eq!(html2.matches("zq-vars.css").count(), 1);
+        assert_eq!(html2.matches("zq-effects.js").count(), 1);
 
         let _ = fs::remove_dir_all(&work);
     }
 
-    /// 真机验证①：注入测试 CSS（红色背景）到真实 ZCode 并启动。
-    /// 手动跑：`cargo test --lib apply_test_to_real -- --ignored --nocapture`
-    /// 跑完后请人工确认 ZCode 界面变红，然后跑 restore_real 还原。
+    /// 注入块剥离的边界：残缺块（有 BEGIN 无 END）也能安全剥离，不死循环。
+    #[test]
+    fn inject_html_残缺块安全剥离() {
+        let html = "<html><head><!--ZQ-THEME-BEGIN--><link></head><body></body></html>";
+        let out = inject_html(html, "<!--ZQ-THEME-BEGIN-->x<!--ZQ-THEME-END-->\n").unwrap();
+        assert_eq!(out.matches(INJECT_BEGIN).count(), 1, "{out}");
+        assert!(out.contains("</head>"), "文档结构不应被破坏：{out}");
+        // 缺 </head> 锚点报错
+        assert!(inject_html("<html><body></body></html>", "x").is_err());
+    }
+
+    /// 真机验证①：应用美化到真实 ZCode 并启动（需人工观察）。
+    /// 手动跑：`cargo test --lib apply_real_beautify -- --ignored --nocapture`
     #[test]
     #[ignore]
-    fn apply_test_to_real() {
-        println!("应用测试 CSS（红色背景）到真实 ZCode...");
-        apply_test_css().expect("应用测试 CSS 失败");
-        println!("✅ 已注入测试 CSS。启动 ZCode 以确认界面变红...");
-        // 启动 ZCode 供人工确认
+    fn apply_real_beautify() {
+        let cfg = BeautifyConfig {
+            enabled: true,
+            theme: Some("tokyo-night".to_string()),
+            acrylic: true,
+            ..Default::default()
+        };
+        apply(&cfg).expect("应用美化失败");
+        println!("✅ 已注入外链并落盘主题资产。启动 ZCode 确认效果...");
         let _ = process::launch_zcode();
-        println!("ZCode 已启动。请观察界面是否明显偏红。");
-        println!("确认后运行 restore_real 测试还原：cargo test --lib restore_real -- --ignored --nocapture");
+        println!("确认后运行 restore_real 还原：cargo test --lib restore_real -- --ignored --nocapture");
     }
 
     /// 真机验证②：还原真实 ZCode 到官方 app.asar 并启动。
@@ -1008,50 +659,6 @@ mod tests {
         restore().expect("还原失败");
         println!("✅ 已还原。启动 ZCode 确认恢复官方外观...");
         let _ = process::launch_zcode();
-        println!("ZCode 已启动。请确认界面恢复原状。");
-    }
-
-    /// 生成测试：打印各预设与自定义组合的 CSS（不改动任何文件）。
-    #[test]
-    fn preview_css() {
-        for (id, name) in preset_list() {
-            let cfg = BeautifyConfig {
-                enabled: true,
-                theme: Some(id.to_string()),
-                ..Default::default()
-            };
-            let css = generate_css(&cfg);
-            println!("===== {} ({}) =====\n{}", name, id, css);
-        }
-        // 毛玻璃（无主题，走 ZCode 默认色板）
-        let cfg = BeautifyConfig {
-            enabled: true,
-            acrylic: true,
-            ..Default::default()
-        };
-        println!("===== 毛玻璃（默认色板）=====\n{}", generate_css(&cfg));
-        // 毛玻璃 + 主题 + 背景图组合
-        let cfg = BeautifyConfig {
-            enabled: true,
-            theme: Some("tokyo-night".to_string()),
-            acrylic: true,
-            surface_opacity: 0.65,
-            bg_image: Some("C:/Pictures/demo.jpg".to_string()),
-            bg_image_opacity: 0.8,
-            ..Default::default()
-        };
-        println!("===== 毛玻璃+主题+背景图 =====\n{}", generate_css(&cfg));
-    }
-
-    /// 背景图资源名与校验逻辑。
-    #[test]
-    fn bg_image_asset_name_rules() {
-        assert_eq!(
-            bg_image_asset_name(Path::new("C:/a/photo.JPG")).as_deref(),
-            Some("zcode-bg.jpg")
-        );
-        assert_eq!(bg_image_asset_name(Path::new("C:/a/photo.bmp")), None);
-        assert!(validate_bg_image(Path::new("C:/no-such-file.png")).is_err());
     }
 
     /// 只读校验：真实 app.asar 内 index.html 存在 `</head>` 注入锚点。
@@ -1078,5 +685,37 @@ mod tests {
             "index.html 未见主样式表引用，结构可能已变化"
         );
         println!("✓ index.html 含 </head> 锚点（{} 字节）", bytes.len());
+    }
+
+    /// 配置兼容：旧版 config.json（无新字段）能解析且新字段取默认值。
+    #[test]
+    fn config_旧版json兼容() {
+        let old = r#"{
+  "enabled": true,
+  "theme": "nord",
+  "acrylic": true,
+  "surface_opacity": 0.5,
+  "bg_image": "C:/pic/a.jpg",
+  "bg_image_opacity": 0.8
+}"#;
+        let cfg: BeautifyConfig = serde_json::from_str(old).unwrap();
+        assert_eq!(cfg.theme.as_deref(), Some("nord"));
+        assert_eq!(cfg.surface_opacity, 0.5);
+        assert_eq!(cfg.bg_image.as_deref(), Some("C:/pic/a.jpg"));
+        assert_eq!(cfg.bg_image_opacity, 0.8);
+        assert_eq!(cfg.sidebar_opacity, None, "新分区字段缺省为 None");
+        assert_eq!(cfg.wp_brightness, 1.1);
+        assert_eq!(cfg.playback_rate, 1.0);
+        // wallpaper_source：wallpaper 优先，bg_image 兜底
+        assert_eq!(
+            theme_assets::wallpaper_source(&cfg).as_deref(),
+            Some("C:/pic/a.jpg")
+        );
+        let mut with_wp = cfg.clone();
+        with_wp.wallpaper = Some("C:/v/a.mp4".to_string());
+        assert_eq!(
+            theme_assets::wallpaper_source(&with_wp).as_deref(),
+            Some("C:/v/a.mp4")
+        );
     }
 }

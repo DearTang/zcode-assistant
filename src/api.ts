@@ -31,6 +31,7 @@ import type {
   UsageOverview,
   UsageRecord,
   UsageSyncResult,
+  ZcCacheStats,
   ZcDeleteResult,
   ZcProject,
   ZcSession,
@@ -373,25 +374,32 @@ export const projects = {
   /** 恢复整个项目（清该项目全部会话的归档标记），返回恢复的会话数 */
   restoreProject: (projectId: string) =>
     invoke<number>("zc_restore_project", { projectId }),
-  /** 批量删除会话 / 项目（级联删除消息与用量，连带清理 rollout 与本地用量记录） */
+  /** 批量删除会话 / 项目（级联删除消息与用量，连带清理会话文件与本地用量记录） */
   delete: (sessionIds: string[], projectIds: string[]) =>
     invoke<ZcDeleteResult>("zc_delete", { sessionIds, projectIds }),
+  /** 缓存清理预览：N 天前至今未活跃的会话数与可释放的会话文件大小 */
+  cacheStats: (days: number) => invoke<ZcCacheStats>("zc_cache_stats", { days }),
+  /** 清理 N 天前未活跃的会话及其全部数据（消息 / 子代理 / 会话文件，不可恢复），并尝试压缩会话库 */
+  cacheCleanup: (days: number) => invoke<ZcDeleteResult>("zc_cache_cleanup", { days }),
 };
 
-/* ============ ZCode 美化（侵入式改造 app.asar）============ */
+/* ============ ZCode 美化（外置主题 + file:// 外链注入）============ */
 export const beautify = {
   /** 美化状态：是否已注入 / 有无备份 / 当前配置 / ZCode 版本 */
   getStatus: () => invoke<BeautifyStatus>("get_beautify_status"),
   /** 可选预设主题列表 */
   getPresets: () => invoke<BeautifyPreset[]>("get_beautify_presets"),
-  /** 弹出系统文件选择器挑选背景图（取消返回 null） */
+  /** 弹出系统文件选择器挑选壁纸（图片/视频，取消返回 null） */
   pickImage: () => invoke<string | null>("pick_beautify_image"),
-  /** 读取背景图 base64 data URL 供预览（>8MB 或格式不支持返回 null） */
+  /** 读取壁纸 base64 data URL 供预览（>8MB 或视频返回 null） */
   readImagePreview: (path: string) =>
     invoke<string | null>("read_beautify_image_preview", { path }),
-  /** 应用美化（备份→原地补丁→替换 app.asar），完成后后端会请求重启 zcode */
+  /** 应用美化（备份→主题资产落盘→注入外链块→替换 app.asar），完成后后端会请求重启 zcode */
   apply: (config: BeautifyConfig) =>
     invoke<void>("apply_beautify", { config }),
+  /** 热保存参数：只落盘主题资产（zq-vars.css + 壁纸），不触碰 asar，约 1 秒生效 */
+  saveParams: (config: BeautifyConfig) =>
+    invoke<void>("save_beautify_params", { config }),
   /** 还原官方 app.asar，完成后后端会请求重启 zcode */
   restore: () => invoke<void>("restore_beautify"),
   /** 全部美化模板列表 */

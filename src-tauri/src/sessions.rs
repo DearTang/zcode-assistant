@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::types::{ZcDeleteResult, ZcProject, ZcSession};
+use crate::types::{ZcCacheStats, ZcDeleteResult, ZcProject, ZcSession};
 use crate::zcode::{config_file, paths};
 
 /// SQLite IN 列表单批参数上限（999 限制留余量）
@@ -492,16 +492,13 @@ pub fn restore_project(project_id: &str) -> anyhow::Result<usize> {
 }
 
 /// 批量删除：会话（自动连带子代理后代）与项目（含其全部会话）。
-/// 级联清掉 message / model_usage 等关联表，并同步清理 rollout 文件与本地用量记录。
+/// 级联清掉 message / model_usage 等关联表，并同步清理会话文件与本地用量记录。
 pub fn delete(
     db: &crate::db::Database,
     session_ids: &[String],
     project_ids: &[String],
 ) -> anyhow::Result<ZcDeleteResult> {
-    let mut conn = open_rw()?;
-    // SQLite 默认关闭外键约束，必须显式开启才有 ON DELETE CASCADE
-    conn.execute_batch("PRAGMA foreign_keys=ON")?;
-
+    let conn = open_ro()?;
     // 展开删除目标：所选会话 + 其全部后代；所选项目 + 其全部会话（及后代）
     let mut targets: HashSet<String> = HashSet::new();
     if !session_ids.is_empty() {
@@ -520,10 +517,76 @@ pub fn delete(
             targets.insert(sid);
         }
     }
+    drop(conn);
     if targets.is_empty() {
         return Ok(ZcDeleteResult::default());
     }
     let ids: Vec<String> = targets.into_iter().collect();
+    let mut res = purge_session_ids(db, &ids)?;
+    res.deleted_projects = project_ids.len();
+    Ok(res)
+}
+
+/// 缓存清理预览：统计最后活跃早于 N 天前的顶层会话及其全部后代（子代理），
+/// 以及可释放的会话文件字节数（agents / artifacts / exec / rollout）。
+pub fn cache_stats(days: i64) -> anyhow::Result<ZcCacheStats> {
+    let (roots, conn) = stale_top_sessions(days)?;
+    if roots.is_empty() {
+        return Ok(ZcCacheStats {
+            days,
+            ..Default::default()
+        });
+    }
+    let ids = expand_descendants(&conn, &roots)?;
+    drop(conn);
+    Ok(ZcCacheStats {
+        days,
+        sessions: roots.len(),
+        total_sessions: ids.len(),
+        freed_bytes: session_files_bytes(&ids),
+    })
+}
+
+/// 清理 N 天前未活跃的会话及其全部关联数据：会话行（级联消息 / 用量表）、任务索引、
+/// 会话文件（agents / artifacts / exec / rollout）与本地用量记录，最后尝试 VACUUM
+/// 压缩会话库回收磁盘空间（zcode 占用锁时跳过，不影响清理结果本身）。
+pub fn cache_cleanup(db: &crate::db::Database, days: i64) -> anyhow::Result<ZcDeleteResult> {
+    let (roots, conn) = stale_top_sessions(days)?;
+    if roots.is_empty() {
+        anyhow::bail!("该时间范围内没有可清理的会话");
+    }
+    let ids = expand_descendants(&conn, &roots)?;
+    drop(conn);
+    let mut res = purge_session_ids(db, &ids)?;
+    res.db_vacuumed = try_vacuum();
+    Ok(res)
+}
+
+/// 取最后活跃早于 N 天前的顶层会话 id（time_updated 缺失时兜底用 time_created）
+fn stale_top_sessions(days: i64) -> anyhow::Result<(Vec<String>, Connection)> {
+    if days < 1 {
+        anyhow::bail!("清理天数必须至少为 1");
+    }
+    let cutoff = Local::now().timestamp_millis() - days.saturating_mul(86_400_000);
+    let conn = open_ro()?;
+    let mut stmt = conn.prepare(
+        "SELECT id FROM session \
+         WHERE parent_id IS NULL AND COALESCE(time_updated, time_created) < ?1",
+    )?;
+    let roots: Vec<String> = stmt
+        .query_map(params![cutoff], |r| r.get(0))?
+        .flatten()
+        .collect();
+    drop(stmt);
+    Ok((roots, conn))
+}
+
+/// 对已展开的会话 id 集合执行物理删除：会话行（外键级联清消息 / 用量）、任务索引、
+/// 会话文件与本地用量记录。delete 与 cache_cleanup 的共用尾部。
+fn purge_session_ids(db: &crate::db::Database, ids: &[String]) -> anyhow::Result<ZcDeleteResult> {
+    let mut conn = open_rw()?;
+    // SQLite 默认关闭外键约束，必须显式开启才有 ON DELETE CASCADE
+    conn.execute_batch("PRAGMA foreign_keys=ON")?;
 
     let tx = conn.transaction()?;
     for chunk in ids.chunks(CHUNK) {
@@ -532,7 +595,6 @@ pub fn delete(
         tx.execute(&sql, rusqlite::params_from_iter(chunk))?;
     }
     tx.commit()?;
-    let deleted_sessions = ids.len();
 
     // 同步清理任务索引（tasks 表按 task_id 关联会话），避免 zcode 界面残留幽灵条目；
     // 失败仅记日志——索引残留不影响会话库数据完整性
@@ -546,15 +608,113 @@ pub fn delete(
         }
     }
 
-    // 顺带清理 rollout 用量文件与本地 usage_records（用量页同步收敛）
-    let freed = cleanup_rollout_files(&ids);
-    let _ = db.delete_usage_by_sessions(&ids);
+    // 顺带清理会话文件与本地 usage_records（用量页同步收敛）
+    let (freed_rollout_files, freed_bytes) = cleanup_session_files(ids);
+    let _ = db.delete_usage_by_sessions(ids);
 
     Ok(ZcDeleteResult {
-        deleted_sessions,
-        deleted_projects: project_ids.len(),
-        freed_rollout_files: freed,
+        deleted_sessions: ids.len(),
+        deleted_projects: 0,
+        freed_rollout_files,
+        freed_bytes,
+        db_vacuumed: false,
     })
+}
+
+/// 尝试 VACUUM 压缩会话库——DELETE 只把页标记为可复用，不缩文件，
+/// 必须显式 VACUUM 才回收磁盘空间。zcode 持锁 / 超时则放弃（仅影响空间回收）。
+fn try_vacuum() -> bool {
+    let Ok(conn) = open_rw() else {
+        return false;
+    };
+    let _ = conn.busy_timeout(Duration::from_secs(60));
+    match conn.execute_batch("VACUUM") {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("VACUUM 压缩会话库失败（不影响清理结果）: {e}");
+            false
+        }
+    }
+}
+
+/// 会话相关文件占用统计（agents / artifacts / exec 的 sess_* 子目录与 rollout 文件）
+fn session_files_bytes(session_ids: &[String]) -> u64 {
+    let dirs: Vec<std::path::PathBuf> = [
+        paths::cli_agents_dir(),
+        paths::cli_artifacts_dir(),
+        paths::cli_exec_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let rollout = paths::rollout_dir();
+    let mut total = 0u64;
+    for sid in session_ids {
+        for base in &dirs {
+            total += dir_size(&base.join(sid));
+        }
+        if let Some(rd) = &rollout {
+            total += std::fs::metadata(rd.join(format!("model-io-{sid}.jsonl")))
+                .map(|m| m.len())
+                .unwrap_or(0);
+        }
+    }
+    total
+}
+
+/// 删除会话相关文件：agents / artifacts / exec 的 sess_* 子目录与 rollout 用量文件。
+/// 返回 (删除的 rollout 文件数, 释放的字节数)；目录删除失败（被占用等）不计入释放量。
+fn cleanup_session_files(session_ids: &[String]) -> (usize, u64) {
+    let dirs: Vec<std::path::PathBuf> = [
+        paths::cli_agents_dir(),
+        paths::cli_artifacts_dir(),
+        paths::cli_exec_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let rollout = paths::rollout_dir();
+    let mut freed_bytes = 0u64;
+    let mut freed_files = 0usize;
+    for sid in session_ids {
+        for base in &dirs {
+            let p = base.join(sid);
+            if !p.is_dir() {
+                continue;
+            }
+            let size = dir_size(&p);
+            if std::fs::remove_dir_all(&p).is_ok() {
+                freed_bytes += size;
+            } else {
+                log::warn!("删除会话目录失败: {}", p.display());
+            }
+        }
+        if let Some(rd) = &rollout {
+            let f = rd.join(format!("model-io-{sid}.jsonl"));
+            if let Ok(meta) = std::fs::metadata(&f) {
+                if std::fs::remove_file(&f).is_ok() {
+                    freed_files += 1;
+                    freed_bytes += meta.len();
+                }
+            }
+        }
+    }
+    (freed_files, freed_bytes)
+}
+
+/// 递归统计目录字节数（不存在返回 0）
+fn dir_size(p: &Path) -> u64 {
+    let mut n = 0u64;
+    if let Ok(rd) = std::fs::read_dir(p) {
+        for e in rd.flatten() {
+            match e.file_type() {
+                Ok(ft) if ft.is_dir() => n += dir_size(&e.path()),
+                Ok(_) => n += e.metadata().map(|m| m.len()).unwrap_or(0),
+                Err(_) => {}
+            }
+        }
+    }
+    n
 }
 
 /// 展开会话 id 列表 → 自身 + 全部后代（子代理会话可能与父会话不同项目，按 id 追而不是按项目）
@@ -576,21 +736,6 @@ fn expand_descendants(conn: &Connection, roots: &[String]) -> anyhow::Result<Vec
         }
     }
     Ok(out)
-}
-
-/// 删除各会话对应的 rollout 用量文件（model-io-<session_id>.jsonl，不存在则跳过）
-fn cleanup_rollout_files(session_ids: &[String]) -> usize {
-    let Some(dir) = paths::rollout_dir() else {
-        return 0;
-    };
-    let mut n = 0;
-    for sid in session_ids {
-        let p = dir.join(format!("model-io-{sid}.jsonl"));
-        if p.is_file() && std::fs::remove_file(&p).is_ok() {
-            n += 1;
-        }
-    }
-    n
 }
 
 fn db_path() -> anyhow::Result<std::path::PathBuf> {

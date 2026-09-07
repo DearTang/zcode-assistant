@@ -1,6 +1,7 @@
-//! ZCode 美化（侵入式改造 app.asar）命令：状态 / 预设 / 应用 / 还原。
-//! 底层逻辑在 `zcode::asar`（asar 操作）与 `zcode::beautify`（注入 + CSS 生成）。
-use crate::zcode::{asar, beautify, beautify::BeautifyConfig, beautify::BeautifyTemplate};
+//! ZCode 美化命令：状态 / 预设 / 应用 / 热保存参数 / 还原。
+//! 底层逻辑在 `zcode::asar`（asar 操作）、`zcode::beautify`（注入 + 配置）与
+//! `zcode::theme_assets`（外置主题资产 + 热重载渲染）。
+use crate::zcode::{asar, beautify, beautify::BeautifyConfig, beautify::BeautifyTemplate, theme_assets};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
@@ -65,24 +66,28 @@ pub async fn get_beautify_presets() -> Vec<PresetInfo> {
         .collect()
 }
 
-/// 弹出系统文件选择器挑选背景图，返回选中图片的绝对路径（取消返回 None）。
+/// 弹出系统文件选择器挑选壁纸（图片或视频），返回选中文件的绝对路径（取消返回 None）。
 #[tauri::command]
 pub fn pick_beautify_image() -> Option<String> {
     rfd::FileDialog::new()
-        .add_filter("图片", &["png", "jpg", "jpeg", "webp", "gif"])
+        .add_filter(
+            "图片 / 视频",
+            &["png", "jpg", "jpeg", "webp", "gif", "mp4", "webm", "mov"],
+        )
         .add_filter("所有文件", &["*"])
         .pick_file()
         .map(|p| p.to_string_lossy().to_string())
 }
 
-/// 读取选中背景图返回 base64 data URL，供前端预览。
-/// 仅接受受支持的图片格式；超过 8MB 返回 None（避免大文件阻塞 IPC）。
+/// 读取选中壁纸返回 base64 data URL，供前端预览。
+/// 仅支持图片格式（视频无法以 data URL 预览，返回 None 由前端显示占位）；
+/// 超过 8MB 返回 None（避免大文件阻塞 IPC）。
 /// async：读文件 + base64 编码耗时，避免阻塞主线程。
 #[tauri::command]
 pub async fn read_beautify_image_preview(path: String) -> Option<String> {
     use base64::Engine;
     let p = std::path::Path::new(&path);
-    beautify::bg_image_asset_name(p)?; // 扩展名校验
+    theme_assets::wallpaper_asset_name(p)?; // 扩展名校验（图片+视频）
     let meta = std::fs::metadata(p).ok()?;
     if meta.len() > 8 * 1024 * 1024 {
         return None;
@@ -93,7 +98,7 @@ pub async fn read_beautify_image_preview(path: String) -> Option<String> {
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         "gif" => "image/gif",
-        _ => return None,
+        _ => return None, // 视频不预览
     };
     Some(format!(
         "data:{mime};base64,{}",
@@ -101,7 +106,8 @@ pub async fn read_beautify_image_preview(path: String) -> Option<String> {
     ))
 }
 
-/// 应用美化：写配置 → 备份（版本感知）→ kill → 原地补丁 app.asar → 替换 → 请求重启。
+/// 应用美化：写配置 → 备份（版本感知）→ 主题资产落盘 → kill → 原地补丁 app.asar
+/// （注入 file:// 外链块）→ 替换 → 请求重启。
 /// async：asar 拷贝/补丁为重 IO 操作，避免长时间冻结主线程。
 #[tauri::command]
 pub async fn apply_beautify(app: AppHandle, config: BeautifyConfig) -> Result<(), String> {
@@ -112,6 +118,14 @@ pub async fn apply_beautify(app: AppHandle, config: BeautifyConfig) -> Result<()
         serde_json::json!({ "reason": "美化已应用，需重启 ZCode 生效" }),
     );
     Ok(())
+}
+
+/// 热保存美化参数：只落盘主题资产（zq-vars.css + 壁纸副本），不触碰 app.asar、
+/// 不关闭 ZCode。已注入的前提下 zq-effects.js 每秒热重载，约 1 秒生效。
+/// async：写文件 + 可能的壁纸拷贝（大视频），避免阻塞主线程。
+#[tauri::command]
+pub async fn save_beautify_params(config: BeautifyConfig) -> Result<(), String> {
+    beautify::save_params(&config).map_err(|e| e.to_string())
 }
 
 /// 还原：kill → 用备份覆盖 app.asar → 请求重启。

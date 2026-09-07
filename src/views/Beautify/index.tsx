@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { beautify as bf } from "../../api";
 import type { BeautifyConfig, BeautifyPreset, BeautifyTemplate } from "../../types";
 import { toast } from "../../components/Toast";
@@ -53,6 +53,9 @@ const defaultCfg = (): BeautifyConfig => ({
   theme: "tokyo-night",
 });
 
+/** 壁纸是否为视频（mp4/webm/mov 无法用 <img> 预览） */
+const isVideoPath = (p?: string) => /\.(mp4|webm|mov)$/i.test(p ?? "");
+
 export default function Beautify() {
   const [presets, setPresets] = useState<BeautifyPreset[]>([]);
   const [cfg, setCfg] = useState<BeautifyConfig>(defaultCfg());
@@ -67,6 +70,10 @@ export default function Beautify() {
   const [templates, setTemplates] = useState<BeautifyTemplate[]>([]);
   const [templateName, setTemplateName] = useState("");
   const [activeTemplate, setActiveTemplate] = useState("");
+  const [syncedAt, setSyncedAt] = useState<number | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  /** 最近一次热保存的配置快照（跳过载入回显触发的保存） */
+  const lastSavedRef = useRef<string>("");
 
   const reload = async () => {
     try {
@@ -87,9 +94,14 @@ export default function Beautify() {
           c.bg_color ||
           c.primary_color ||
           c.acrylic ||
+          c.wallpaper ||
           c.bg_image)
       ) {
         setCfg({ ...defaultCfg(), ...c });
+        lastSavedRef.current = JSON.stringify({ ...defaultCfg(), ...c, enabled: true });
+      } else {
+        setCfg(defaultCfg());
+        lastSavedRef.current = JSON.stringify({ ...defaultCfg(), enabled: true });
       }
     } catch (e: unknown) {
       toast.error(String(e));
@@ -104,12 +116,32 @@ export default function Beautify() {
     bf.listTemplates().then(setTemplates).catch(() => {});
   }, []);
 
-  // 背景图变化时加载预览（base64 data URL，>8MB 返回 null 则不显示）
+  // 已注入状态下参数变更 → 热保存（防抖 600ms）：只写 zq-vars.css，约 1 秒生效
+  useEffect(() => {
+    if (!installed || loading) return;
+    const payload: BeautifyConfig = { ...cfg, enabled: true };
+    const json = JSON.stringify(payload);
+    if (json === lastSavedRef.current) return;
+    const t = setTimeout(() => {
+      setSyncing(true);
+      bf.saveParams(payload)
+        .then(() => {
+          lastSavedRef.current = json;
+          setSyncedAt(Date.now());
+        })
+        .catch((e: unknown) => toast.error(String(e)))
+        .finally(() => setSyncing(false));
+    }, 600);
+    return () => clearTimeout(t);
+  }, [cfg, installed, loading]);
+
+  // 壁纸变化时加载预览（base64 data URL；视频或 >8MB 返回 null 则不显示）
+  const wallpaperPath = cfg.wallpaper ?? cfg.bg_image;
   useEffect(() => {
     let cancelled = false;
     setPreview(null);
-    if (cfg.bg_image) {
-      bf.readImagePreview(cfg.bg_image)
+    if (wallpaperPath && !isVideoPath(wallpaperPath)) {
+      bf.readImagePreview(wallpaperPath)
         .then((d) => {
           if (!cancelled) setPreview(d);
         })
@@ -118,7 +150,7 @@ export default function Beautify() {
     return () => {
       cancelled = true;
     };
-  }, [cfg.bg_image]);
+  }, [wallpaperPath]);
 
   const apply = async () => {
     setBusy("apply");
@@ -147,10 +179,10 @@ export default function Beautify() {
     }
   };
 
-  const pickImage = async () => {
+  const pickWallpaper = async () => {
     try {
       const p = await bf.pickImage();
-      if (p) setCfg({ ...cfg, bg_image: p });
+      if (p) setCfg({ ...cfg, wallpaper: p, bg_image: undefined });
     } catch (e: unknown) {
       toast.error(String(e));
     }
@@ -180,7 +212,11 @@ export default function Beautify() {
   const loadTemplate = (t: BeautifyTemplate) => {
     setCfg({ ...defaultCfg(), ...t.config });
     setActiveTemplate(t.name);
-    toast.success(`已载入模板「${t.name}」，点「应用美化」后生效`);
+    toast.success(
+      installed
+        ? `已载入模板「${t.name}」，参数实时生效中`
+        : `已载入模板「${t.name}」，点「应用美化」后生效`,
+    );
   };
 
   const removeTemplate = async (name: string) => {
@@ -198,9 +234,16 @@ export default function Beautify() {
   // 备份版本与当前 ZCode 不一致 = 备份已过期（升级替换了 app.asar，备份没跟上）
   const backupStale =
     hasBackup && !!backupVersion && !!zcodeVersion && backupVersion !== zcodeVersion;
-  const translucencyActive = !!cfg.acrylic || !!cfg.bg_image;
+  // 透出模式：毛玻璃或壁纸任一启用（分区滑块/描边在此模式下才有意义）
+  const translucencyActive =
+    !!cfg.acrylic || !!cfg.wallpaper || !!cfg.bg_image;
   // 预览用表面色：自定义背景色 > 主题背景色 > ZCode 暗色默认
   const surfaceColor = cfg.bg_color || PREVIEW[cfg.theme ?? ""]?.bg || "#171717";
+  // 三分区滑块值：未单独设置时跟随"桌面不透明度"
+  const surf = cfg.surface_opacity ?? 0.72;
+  const sideOp = Math.round((cfg.sidebar_opacity ?? surf) * 100);
+  const panelOp = Math.round((cfg.panel_opacity ?? surf) * 100);
+  const rightOp = Math.round((cfg.sidebar_right_opacity ?? surf) * 100);
 
   return (
     <>
@@ -217,8 +260,10 @@ export default function Beautify() {
           </span>
         </div>
         <p className="za-muted" style={{ margin: "0 0 12px" }}>
-          通过向 ZCode 的 <span className="za-mono">app.asar</span> 注入一段自定义
-          CSS 实现换肤 / 换字体 / 毛玻璃 / 背景图。首次应用会自动备份原始包，随时可一键还原。
+          通过向 ZCode 的 <span className="za-mono">app.asar</span> 注入三个
+          <span className="za-mono"> file:// </span>外链（变量 / 主题 / 运行时脚本）实现换肤、
+          换字体、毛玻璃、视频壁纸。首次应用会自动备份原始包；此后在已注入状态下
+          <b> 所有参数改动约 1 秒实时生效</b>，无需重复应用。
           ZCode 自动更新后美化会失效，需重新应用。
         </p>
         <div
@@ -400,7 +445,7 @@ export default function Beautify() {
         </div>
         <RangeField
           label="桌面不透明度（越小越透）"
-          value={Math.round((cfg.surface_opacity ?? 0.72) * 100)}
+          value={Math.round(surf * 100)}
           min={20}
           max={100}
           disabled={!translucencyActive}
@@ -409,32 +454,33 @@ export default function Beautify() {
         <FrostedPreview
           active={translucencyActive}
           surfaceColor={surfaceColor}
-          surfaceOpacity={cfg.surface_opacity ?? 0.72}
-          wallpaper={cfg.bg_image ? preview : null}
+          surfaceOpacity={surf}
+          wallpaper={wallpaperPath && !isVideoPath(wallpaperPath) ? preview : null}
           wallpaperOpacity={cfg.bg_image_opacity ?? 1}
         />
       </div>
 
-      {/* 背景图 */}
+      {/* 壁纸（图片/视频） */}
       <div className="za-panel za-card-pad">
         <div className="za-section-title">
-          <h3>背景图</h3>
+          <h3>壁纸</h3>
         </div>
         <p className="za-muted" style={{ margin: "0 0 12px" }}>
-          选择本地图片作为窗口背景（应用时复制进 app.asar），透过半透明界面显现。
+          选择本地图片或视频（mp4 / webm / mov）作为窗口背景。应用后以独立图层
+          置于界面之下，透过半透明表面显现；换图 / 调滤镜实时生效。
         </p>
         <div
           className="za-row"
           style={{ gap: 8, alignItems: "center", flexWrap: "wrap" }}
         >
-          <button className="za-btn za-btn-sm" onClick={pickImage}>
-            选择背景图…
+          <button className="za-btn za-btn-sm" onClick={pickWallpaper}>
+            选择壁纸…
           </button>
-          {cfg.bg_image ? (
+          {wallpaperPath ? (
             <>
               <span
                 className="za-mono"
-                title={cfg.bg_image}
+                title={wallpaperPath}
                 style={{
                   fontSize: "var(--fs-xs)",
                   color: "var(--text-secondary)",
@@ -444,33 +490,77 @@ export default function Beautify() {
                   whiteSpace: "nowrap",
                 }}
               >
-                {cfg.bg_image.split(/[\\/]/).pop()}
+                {isVideoPath(wallpaperPath) ? "🎬 " : ""}
+                {wallpaperPath.split(/[\\/]/).pop()}
               </span>
               <button
                 className="za-btn za-btn-sm"
-                onClick={() => setCfg({ ...cfg, bg_image: undefined })}
+                onClick={() => setCfg({ ...cfg, wallpaper: undefined, bg_image: undefined })}
               >
                 移除
               </button>
             </>
           ) : (
             <span className="za-faint" style={{ fontSize: "var(--fs-xs)" }}>
-              未设置（png / jpg / webp / gif）
+              未设置（png / jpg / webp / gif / mp4 / webm / mov）
             </span>
           )}
         </div>
         <div style={{ marginTop: 12 }}>
           <RangeField
-            label="背景图不透明度"
+            label="壁纸不透明度"
             value={Math.round((cfg.bg_image_opacity ?? 1) * 100)}
             min={10}
             max={100}
-            disabled={!cfg.bg_image}
+            disabled={!wallpaperPath}
             onChange={(v) => setCfg({ ...cfg, bg_image_opacity: v / 100 })}
           />
         </div>
-        {/* 背景图不透明度实时预览：按当前透明度叠在模拟桌面上 */}
-        {cfg.bg_image && preview && (
+        {/* 壁纸滤镜：亮度 / 饱和 / 模糊 / 压暗遮罩 / 视频倍速 */}
+        {wallpaperPath && (
+          <div style={{ marginTop: 6 }}>
+            <RangeField
+              label="亮度"
+              value={Math.round((cfg.wp_brightness ?? 1.1) * 100)}
+              min={20}
+              max={200}
+              onChange={(v) => setCfg({ ...cfg, wp_brightness: v / 100 })}
+            />
+            <RangeField
+              label="饱和度"
+              value={Math.round((cfg.wp_saturate ?? 1.4) * 100)}
+              min={0}
+              max={200}
+              onChange={(v) => setCfg({ ...cfg, wp_saturate: v / 100 })}
+            />
+            <RangeField
+              label="模糊"
+              value={cfg.wp_blur ?? 0}
+              min={0}
+              max={30}
+              suffix="px"
+              onChange={(v) => setCfg({ ...cfg, wp_blur: v })}
+            />
+            <RangeField
+              label="压暗遮罩（壁纸过亮时压暗保证文字可读）"
+              value={Math.round((cfg.mask_strength ?? 0) * 100)}
+              min={0}
+              max={90}
+              onChange={(v) => setCfg({ ...cfg, mask_strength: v / 100 })}
+            />
+            {isVideoPath(wallpaperPath) && (
+              <RangeField
+                label="播放速率（视频壁纸）"
+                value={Math.round((cfg.playback_rate ?? 1) * 100)}
+                min={25}
+                max={400}
+                onChange={(v) => setCfg({ ...cfg, playback_rate: v / 100 })}
+              />
+            )}
+          </div>
+        )}
+        {/* 图片壁纸预览：按当前透明度叠在模拟桌面上 */}
+        {wallpaperPath && preview && (
           <div style={{ marginTop: 10 }}>
             <div
               style={{
@@ -493,7 +583,7 @@ export default function Beautify() {
             >
               <img
                 src={preview}
-                alt="背景图预览"
+                alt="壁纸预览"
                 style={{
                   position: "absolute",
                   inset: 0,
@@ -506,6 +596,50 @@ export default function Beautify() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* 分区透明度与文字可读性 */}
+      <div className="za-panel za-card-pad">
+        <div className="za-section-title">
+          <h3>分区透明度与文字可读性</h3>
+        </div>
+        <p className="za-muted" style={{ margin: "0 0 12px" }}>
+          左栏 / 对话区 / 右栏三块主区域各自独立控制透明度，互不牵连；
+          不单独调整时跟随「桌面不透明度」。壁纸过亮 / 过暗时可用文字描边
+          把前景文字从背景里托出来。
+        </p>
+        <RangeField
+          label="左栏透明度"
+          value={sideOp}
+          min={0}
+          max={100}
+          disabled={!translucencyActive}
+          onChange={(v) => setCfg({ ...cfg, sidebar_opacity: v / 100 })}
+        />
+        <RangeField
+          label="对话区透明度"
+          value={panelOp}
+          min={0}
+          max={100}
+          disabled={!translucencyActive}
+          onChange={(v) => setCfg({ ...cfg, panel_opacity: v / 100 })}
+        />
+        <RangeField
+          label="右栏透明度"
+          value={rightOp}
+          min={0}
+          max={100}
+          disabled={!translucencyActive}
+          onChange={(v) => setCfg({ ...cfg, sidebar_right_opacity: v / 100 })}
+        />
+        <RangeField
+          label="文字描边"
+          value={Math.round((cfg.text_shadow ?? 0) * 100)}
+          min={0}
+          max={100}
+          disabled={!translucencyActive}
+          onChange={(v) => setCfg({ ...cfg, text_shadow: v / 100 })}
+        />
       </div>
 
       {/* 应用 + 模板 */}
@@ -521,12 +655,23 @@ export default function Beautify() {
           </button>
           {busyNow && (
             <span className="za-faint" style={{ fontSize: "var(--fs-sm)" }}>
-              正在解包并重打包 app.asar（约 300MB），需数秒~十几秒，请稍候…
+              正在补丁 app.asar（约 300MB），需数秒~十几秒，请稍候…
+            </span>
+          )}
+          {installed && !busyNow && (
+            <span className="za-faint" style={{ fontSize: "var(--fs-xs)" }}>
+              {syncing
+                ? "正在同步参数…"
+                : syncedAt
+                  ? `参数已实时生效（${new Date(syncedAt).toLocaleTimeString()}）`
+                  : "参数改动自动实时生效（约 1 秒）"}
             </span>
           )}
         </div>
         <p className="za-muted" style={{ margin: "10px 0 0", fontSize: "var(--fs-xs)" }}>
-          应用过程会先关闭 ZCode 以释放文件锁，完成后会询问是否重启。
+          「应用」只在首次注入、ZCode 升级后或需要修复注入时使用：
+          会先关闭 ZCode 以释放文件锁，完成后询问是否重启。
+          已注入状态下日常调整参数无需点「应用」。
         </p>
 
         {/* 我的模板 */}
@@ -629,7 +774,7 @@ export default function Beautify() {
   );
 }
 
-/** 模板摘要：主题 / 字体 / 毛玻璃 / 背景图 等要点 */
+/** 模板摘要：主题 / 字体 / 毛玻璃 / 壁纸 等要点 */
 function describeTemplate(c: BeautifyConfig, presets: BeautifyPreset[]): string {
   const parts: string[] = [];
   if (c.theme && c.theme !== "none") {
@@ -638,7 +783,8 @@ function describeTemplate(c: BeautifyConfig, presets: BeautifyPreset[]): string 
   if (c.ui_font) parts.push(c.ui_font);
   if (c.bg_color) parts.push(`背景色 ${c.bg_color}`);
   if (c.acrylic) parts.push("毛玻璃");
-  if (c.bg_image) parts.push("背景图");
+  const wp = c.wallpaper ?? c.bg_image;
+  if (wp) parts.push(/\.(mp4|webm|mov)$/i.test(wp) ? "视频壁纸" : "壁纸");
   return parts.length > 0 ? parts.join(" · ") : "默认外观";
 }
 
@@ -861,6 +1007,7 @@ function RangeField({
   min,
   max,
   disabled,
+  suffix = "%",
   onChange,
 }: {
   label: string;
@@ -868,10 +1015,12 @@ function RangeField({
   min: number;
   max: number;
   disabled?: boolean;
+  /** 数值后缀（默认 %，如模糊用 px） */
+  suffix?: string;
   onChange: (v: number) => void;
 }) {
   return (
-    <label style={{ ...field, opacity: disabled ? 0.45 : 1 }}>
+    <label style={{ ...field, opacity: disabled ? 0.45 : 1, marginBottom: 6 }}>
       {label}
       <div className="za-row" style={{ gap: 10, alignItems: "center" }}>
         <input
@@ -887,8 +1036,9 @@ function RangeField({
             cursor: disabled ? "not-allowed" : "pointer",
           }}
         />
-        <span className="za-mono" style={{ width: 42, textAlign: "right" }}>
-          {value}%
+        <span className="za-mono" style={{ width: 52, textAlign: "right" }}>
+          {value}
+          {suffix}
         </span>
       </div>
     </label>

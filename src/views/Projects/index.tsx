@@ -4,12 +4,12 @@
  * - 展开项目查看会话明细（消耗含子代理后代），支持行内改名（title_source=custom）；
  * - 归档会话默认隐藏，「查看历史」开关两级控制（全局：全归档项目；项目内：归档会话），
  *   归档会话可一键恢复（清 time_archived），回 zcode 会话列表继续对话；
- * - 项目与会话均支持勾选批量删除（级联清掉消息 / 用量，并同步本地用量记录）。
+ * - 项目与会话均支持勾选批量归档（不删除，可在「查看历史」恢复）与批量删除（级联清掉消息 / 用量）。
  * - 排序：项目与会话均按最后活跃时间倒序。
  */
 import { useCallback, useEffect, useState } from "react";
 import { projects as projectsApi, formatUnits } from "../../api";
-import type { ZcProject, ZcSession } from "../../types";
+import type { ZcCacheStats, ZcProject, ZcSession } from "../../types";
 import {
   IconRefresh,
   IconTrash,
@@ -42,6 +42,29 @@ function baseName(dir: string): string {
   return parts[parts.length - 1] || dir;
 }
 
+/** 字节数 → 人类可读（B/KB/MB/GB/TB） */
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  const s = i === 0 ? String(Math.round(v)) : v >= 100 ? v.toFixed(0) : v.toFixed(1);
+  return `${s} ${units[i]}`;
+}
+
+/** 清理缓存的时间范围选项（删除最后活跃早于该时间点的会话及其全部数据） */
+const CACHE_OPTIONS = [
+  { days: 3, label: "3 天前" },
+  { days: 5, label: "5 天前" },
+  { days: 7, label: "7 天前" },
+  { days: 15, label: "半个月前" },
+  { days: 30, label: "1 个月前" },
+];
+
 export default function Projects() {
   const [loading, setLoading] = useState(true);
   const [list, setList] = useState<ZcProject[]>([]);
@@ -59,6 +82,12 @@ export default function Projects() {
   const [showHistory, setShowHistory] = useState(false);
   // 项目内开关（默认隐藏归档会话），按项目 id 记忆
   const [projectHistory, setProjectHistory] = useState<Record<string, boolean>>({});
+  // 清理缓存弹窗：开关 / 选定时间范围 / 预览统计 / 执行中标记
+  const [cacheOpen, setCacheOpen] = useState(false);
+  const [cacheDays, setCacheDays] = useState(7);
+  const [cacheStats, setCacheStats] = useState<ZcCacheStats | null>(null);
+  const [cacheStatsLoading, setCacheStatsLoading] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -74,6 +103,28 @@ export default function Projects() {
   useEffect(() => {
     reload();
   }, [reload]);
+
+  // 打开清理弹窗或切换时间范围时拉取预览统计
+  useEffect(() => {
+    if (!cacheOpen) return;
+    let alive = true;
+    setCacheStats(null);
+    setCacheStatsLoading(true);
+    projectsApi
+      .cacheStats(cacheDays)
+      .then((s) => {
+        if (alive) setCacheStats(s);
+      })
+      .catch((e: unknown) => {
+        if (alive) toast.error(`统计失败：${e instanceof Error ? e.message : String(e)}`);
+      })
+      .finally(() => {
+        if (alive) setCacheStatsLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [cacheOpen, cacheDays]);
 
   const loadSessions = useCallback(async (projectId: string, force = false) => {
     if (!force && sessionsMap[projectId]) return;
@@ -175,19 +226,19 @@ export default function Projects() {
     try {
       const n = await projectsApi.archiveProject(p.id);
       await Promise.all([loadSessions(p.id, true), reload()]);
-      toast.success(`已归档 ${n} 个会话，可随时恢复`);
+      toast.success(`已归档该项目 ${n} 个会话，可在「查看历史会话」恢复`);
     } catch (e: unknown) {
       toast.error(`归档失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
-  // ============ 批量关闭（归档所选会话） ============
+  // ============ 批量归档（不删除，可在「查看历史」恢复） ============
   const doArchiveSelected = async () => {
     const sids = [...selectedSessions];
     if (sids.length === 0) return;
     if (
       !confirm(
-        `将关闭（归档）所选 ${sids.length} 个会话（已归档的自动跳过），在 zcode 会话列表隐藏，可随时在「查看历史会话」中恢复。继续？`
+        `将归档所选 ${sids.length} 个会话（已归档的自动跳过），在 zcode 会话列表隐藏，可随时在「查看历史会话」中恢复。继续？`
       )
     ) {
       return;
@@ -198,9 +249,37 @@ export default function Projects() {
       clearSelection();
       if (expandedId) await loadSessions(expandedId, true);
       await reload();
-      toast.success(`已关闭（归档）${n} 个会话，可在「查看历史会话」中恢复`);
+      toast.success(`已归档 ${n} 个会话，可在「查看历史会话」中恢复`);
     } catch (e: unknown) {
-      toast.error(`关闭失败：${e instanceof Error ? e.message : String(e)}`);
+      toast.error(`归档失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setArchiving(false);
+    }
+  };
+
+  /** 批量归档所选项目：逐个项目归档其全部活跃会话（不删除，可随时恢复） */
+  const doArchiveSelectedProjects = async () => {
+    const pids = [...selectedProjects];
+    if (pids.length === 0) return;
+    if (
+      !confirm(
+        `将归档所选 ${pids.length} 个项目的全部活跃会话（已归档的自动跳过），在 zcode 会话列表隐藏，可随时恢复。继续？`
+      )
+    ) {
+      return;
+    }
+    setArchiving(true);
+    try {
+      let n = 0;
+      for (const pid of pids) {
+        n += await projectsApi.archiveProject(pid);
+      }
+      clearSelection();
+      if (expandedId) await loadSessions(expandedId, true);
+      await reload();
+      toast.success(`已归档 ${pids.length} 个项目共 ${n} 个会话，可在「查看历史会话」中恢复`);
+    } catch (e: unknown) {
+      toast.error(`归档失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setArchiving(false);
     }
@@ -212,7 +291,7 @@ export default function Projects() {
     try {
       const n = await projectsApi.restoreProject(p.id);
       await Promise.all([loadSessions(p.id, true), reload()]);
-      toast.success(`已恢复 ${n} 个会话，可在 zcode 中继续对话`);
+      toast.success(`已恢复该项目 ${n} 个会话，可在 zcode 中继续对话`);
       toast.warning(SESSION_RESTART_HINT);
     } catch (e: unknown) {
       toast.error(`恢复失败：${e instanceof Error ? e.message : String(e)}`);
@@ -256,6 +335,9 @@ export default function Projects() {
     if (!confirm(`${msg}，操作不可恢复。若相关会话正在 zcode 中打开，建议先关闭对应窗口。继续？`)) {
       return;
     }
+    if (!confirm("二次确认：删除后数据不可恢复、无法找回。确定删除吗？")) {
+      return;
+    }
     setDeleting(true);
     try {
       const res = await projectsApi.delete(sids, pids);
@@ -280,6 +362,43 @@ export default function Projects() {
       toast.error(`删除失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  // ============ 清理缓存（按时间批量删除久未活跃会话的全部数据） ============
+  const doCacheCleanup = async () => {
+    if (!cacheStats || cacheStats.sessions === 0) return;
+    const opt = CACHE_OPTIONS.find((o) => o.days === cacheDays);
+    const label = opt ? opt.label : `${cacheDays} 天前`;
+    const sizeText =
+      cacheStats.freedBytes > 0 ? `，可释放约 ${fmtBytes(cacheStats.freedBytes)} 的缓存文件` : "";
+    if (
+      !confirm(
+        `将删除${label}至今未活跃的 ${cacheStats.sessions} 个会话（含子代理共 ${cacheStats.totalSessions} 个）及其消息、子代理记录、工具缓存与用量记录${sizeText}。若相关会话正在 zcode 中打开，建议先关闭对应窗口。继续？`
+      )
+    ) {
+      return;
+    }
+    if (!confirm("二次确认：清理后数据不可恢复、无法找回。确定清理吗？")) {
+      return;
+    }
+    setCleaning(true);
+    try {
+      const res = await projectsApi.cacheCleanup(cacheDays);
+      setCacheOpen(false);
+      setSessionsMap({});
+      clearSelection();
+      setExpandedId(null);
+      await reload();
+      toast.success(
+        `已清理 ${res.deletedSessions} 个会话${
+          res.freedBytes > 0 ? `，释放约 ${fmtBytes(res.freedBytes)}` : ""
+        }${res.dbVacuumed ? "，会话库已压缩" : ""}`
+      );
+    } catch (e: unknown) {
+      toast.error(`清理失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCleaning(false);
     }
   };
 
@@ -332,6 +451,14 @@ export default function Projects() {
           <div className="za-row">
             <button
               className="za-btn za-btn-sm"
+              onClick={() => setCacheOpen(true)}
+              title="按时间批量清理久未活跃的会话及其缓存数据，释放磁盘空间"
+            >
+              <IconTrash width={14} height={14} />
+              清理缓存
+            </button>
+            <button
+              className="za-btn za-btn-sm"
               data-active={showHistory}
               style={showHistory ? activeBtnStyle : undefined}
               onClick={() => setShowHistory((v) => !v)}
@@ -351,8 +478,10 @@ export default function Projects() {
         </div>
         <p className="za-muted" style={{ margin: "0 0 12px" }}>
           管理 zcode 的项目与会话：查看各项目 / 会话的 token 消耗、对话次数与创建时间，支持会话改名、
-          归档 / 恢复、全选批量关闭、批量删除。默认只显示活跃会话，开启「查看历史项目 / 查看历史会话」查看归档；
-          删除会同时清理消息、用量记录与本地缓存，不可恢复。
+          归档项目 / 归档会话 / 恢复项目 / 恢复会话与批量归档（只归档不删除，可在「查看历史」恢复）、
+          批量删除。默认只显示活跃会话，开启「查看历史项目 / 查看历史会话」查看归档。
+          「清理缓存」可按时间批量删除久未活跃的会话及其全部数据；删除 / 清理会同时清理消息、用量记录、
+          子代理记录与缓存文件，不可恢复。
         </p>
 
         {totalSelected > 0 && (
@@ -378,9 +507,19 @@ export default function Projects() {
                   className="za-btn za-btn-sm"
                   onClick={doArchiveSelected}
                   disabled={archiving || deleting}
-                  title="批量关闭所选会话（归档：zcode 会话列表隐藏，可随时恢复）"
+                  title="批量归档所选会话（不删除：zcode 会话列表隐藏，可随时恢复）"
                 >
-                  {archiving ? "关闭中…" : "关闭所选"}
+                  {archiving ? "归档中…" : "归档所选会话"}
+                </button>
+              )}
+              {selectedProjects.size > 0 && (
+                <button
+                  className="za-btn za-btn-sm"
+                  onClick={doArchiveSelectedProjects}
+                  disabled={archiving || deleting}
+                  title="批量归档所选项目的全部活跃会话（不删除：可随时恢复）"
+                >
+                  {archiving ? "归档中…" : "归档所选项目"}
                 </button>
               )}
               <button
@@ -491,9 +630,9 @@ export default function Projects() {
                             e.stopPropagation();
                             doArchiveProject(p);
                           }}
-                          title="归档该项目全部活跃会话（对称于 zcode 的「归档项目」），可随时恢复"
+                          title="归档项目：批量归档该项目全部活跃会话（对称于 zcode 的「归档项目」），可随时恢复"
                         >
-                          归档
+                          归档项目
                         </button>
                       )}
                       {p.archivedSessions > 0 && (
@@ -504,9 +643,9 @@ export default function Projects() {
                             e.stopPropagation();
                             doRestoreProject(p);
                           }}
-                          title="恢复该项目全部已归档会话，可在 zcode 中继续对话"
+                          title="恢复项目：恢复该项目全部已归档会话，可在 zcode 中继续对话"
                         >
-                          恢复
+                          恢复项目
                         </button>
                       )}
                       <span title="对话次数（含子代理）">对话 {p.turns.toLocaleString()}</span>
@@ -581,7 +720,7 @@ export default function Projects() {
                                 <th>总量</th>
                                 <th>创建时间</th>
                                 <th>最近活跃</th>
-                                <th style={{ width: 112 }}></th>
+                                <th style={{ width: 158 }}></th>
                               </tr>
                             </thead>
                             <tbody>
@@ -689,18 +828,18 @@ export default function Projects() {
                                               className="za-btn za-btn-sm"
                                               style={{ height: 24, padding: "0 10px" }}
                                               onClick={() => doRestore(s)}
-                                              title="恢复归档，可在 zcode 中继续对话"
+                                              title="恢复会话：清掉归档标记，回 zcode 会话列表继续对话"
                                             >
-                                              恢复
+                                              恢复会话
                                             </button>
                                           ) : (
                                             <button
                                               className="za-btn za-btn-sm"
                                               style={{ height: 24, padding: "0 10px" }}
                                               onClick={() => doArchiveSession(s)}
-                                              title="归档会话（zcode 会话列表隐藏，可随时恢复）"
+                                              title="归档会话：zcode 会话列表隐藏，可随时恢复"
                                             >
-                                              归档
+                                              归档会话
                                             </button>
                                           )}
                                           <button
@@ -737,6 +876,77 @@ export default function Projects() {
           </div>
         )}
       </div>
+
+      {/* 清理缓存弹窗 */}
+      {cacheOpen && (
+        <div className="rd-overlay" onClick={() => !cleaning && setCacheOpen(false)}>
+          <div
+            className="za-glass-strong rd-card"
+            style={{ width: 420 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <strong>清理缓存数据</strong>
+            <p className="za-muted" style={{ fontSize: "var(--fs-sm)", margin: 0 }}>
+              删除最后活跃时间早于所选时间点的会话及其全部数据：消息、子代理执行记录、工具结果缓存、
+              执行日志与用量记录，并尝试压缩会话数据库进一步释放空间。
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {CACHE_OPTIONS.map((o) => (
+                <label
+                  key={o.days}
+                  className="za-row"
+                  style={{ gap: 8, cursor: "pointer", fontSize: "var(--fs-sm)" }}
+                >
+                  <input
+                    type="radio"
+                    name="cache-days"
+                    checked={cacheDays === o.days}
+                    onChange={() => setCacheDays(o.days)}
+                    style={{ accentColor: "var(--accent)" }}
+                  />
+                  {o.label}的会话
+                </label>
+              ))}
+            </div>
+            <div
+              className="za-faint"
+              style={{
+                fontSize: "var(--fs-xs)",
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid var(--glass-border)",
+                lineHeight: 1.6,
+              }}
+            >
+              {cacheStatsLoading
+                ? "统计中…"
+                : cacheStats
+                ? cacheStats.sessions === 0
+                  ? "该时间范围内没有可清理的会话"
+                  : `将删除 ${cacheStats.sessions} 个会话（含子代理共 ${cacheStats.totalSessions} 个），预计释放约 ${fmtBytes(cacheStats.freedBytes)} 的缓存文件。`
+                : "—"}
+            </div>
+            <div className="za-row" style={{ justifyContent: "flex-end", gap: 8 }}>
+              <button
+                className="za-btn za-btn-sm"
+                onClick={() => setCacheOpen(false)}
+                disabled={cleaning}
+              >
+                取消
+              </button>
+              <button
+                className="za-btn za-btn-sm"
+                style={{ color: "#e5484d", borderColor: "#e5484d" }}
+                disabled={cleaning || !cacheStats || cacheStats.sessions === 0}
+                onClick={doCacheCleanup}
+              >
+                <IconTrash width={13} height={13} />
+                {cleaning ? "清理中…" : "确认清理"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

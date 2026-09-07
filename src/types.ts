@@ -212,6 +212,21 @@ export interface ZcDeleteResult {
   deletedSessions: number;
   deletedProjects: number;
   freedRolloutFiles: number;
+  /** 顺带清理的会话文件（子代理记录 / 工具结果 / 执行日志 / rollout）字节数 */
+  freedBytes: number;
+  /** 清理后是否成功 VACUUM 压缩了会话库 */
+  dbVacuumed: boolean;
+}
+
+/** 缓存清理预览：N 天前（最后活跃早于该时间）待清理的会话统计 */
+export interface ZcCacheStats {
+  days: number;
+  /** 命中的顶层会话数 */
+  sessions: number;
+  /** 含子代理后代的展开总数 */
+  totalSessions: number;
+  /** 可释放的会话文件字节数（数据库空间经 VACUUM 另行回收） */
+  freedBytes: number;
 }
 
 /* ============ ZCode 美化（侵入式改造 app.asar）============ */
@@ -232,12 +247,32 @@ export interface BeautifyConfig {
   primary_color?: string;
   /** 毛玻璃：表面半透明，透出 Windows acrylic 原生模糊 */
   acrylic?: boolean;
-  /** 表面不透明度（0.2–1），毛玻璃或背景图启用时生效，越大越实 */
+  /** 全局表面/氛围不透明度（0.2–1），毛玻璃或壁纸启用时生效，越大越实 */
   surface_opacity?: number;
-  /** 背景图（本地绝对路径，应用时复制进 app.asar） */
+  /** 左栏透明度（0–1）；不设置 = 跟随 surface_opacity */
+  sidebar_opacity?: number;
+  /** 对话区透明度（0–1）；不设置 = 跟随 surface_opacity */
+  panel_opacity?: number;
+  /** 右栏透明度（0–1）；不设置 = 跟随 surface_opacity */
+  sidebar_right_opacity?: number;
+  /** 文字描边强度（0–1，0=关），壁纸过亮/过暗时提升前景可读性 */
+  text_shadow?: number;
+  /** 壁纸（本地绝对路径，图片或视频 mp4/webm/mov）；优先于旧字段 bg_image */
+  wallpaper?: string;
+  /** 旧字段（背景图路径），保留兼容旧配置 */
   bg_image?: string;
-  /** 背景图图层不透明度（0.1–1） */
+  /** 壁纸图层不透明度（0.1–1） */
   bg_image_opacity?: number;
+  /** 壁纸亮度滤镜（0.2–2，默认 1.1） */
+  wp_brightness?: number;
+  /** 壁纸饱和度滤镜（0–2，默认 1.4） */
+  wp_saturate?: number;
+  /** 壁纸模糊滤镜（0–30px，默认 0） */
+  wp_blur?: number;
+  /** 压暗遮罩强度（0–0.9），壁纸过亮时保证前景可读 */
+  mask_strength?: number;
+  /** 视频壁纸播放速率（0.25–4，默认 1） */
+  playback_rate?: number;
 }
 
 /** 美化状态 */

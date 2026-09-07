@@ -294,4 +294,16 @@ pub struct ZcDeleteResult {
     pub deleted_sessions: usize,
     pub deleted_projects: usize,
     pub freed_rollout_files: usize, // 顺带清理的 model-io-sess_*.jsonl 数量
+    pub freed_bytes: u64,           // 顺带清理的会话文件（agents/artifacts/exec/rollout）字节数
+    pub db_vacuumed: bool,          // 清理后是否成功 VACUUM 压缩了会话库
+}
+
+/// 缓存清理预览：N 天前（最后活跃早于该时间）待清理的会话统计
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ZcCacheStats {
+    pub days: i64,
+    pub sessions: usize,       // 命中的顶层会话数
+    pub total_sessions: usize, // 含子代理后代的展开总数
+    pub freed_bytes: u64,      // 可释放的会话文件字节数（数据库空间经 VACUUM 另行回收）
 }

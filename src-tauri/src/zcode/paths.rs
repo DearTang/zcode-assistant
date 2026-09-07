@@ -29,6 +29,22 @@ pub fn zcode_cli_db_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".zcode").join("cli").join("db").join("db.sqlite"))
 }
 
+/// zcode CLI 各会话的子代理执行记录目录（agents/sess_*/agent_*/transcript.jsonl 等，
+/// 按会话 id 组织，通常是磁盘占用大头）
+pub fn cli_agents_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".zcode").join("cli").join("agents"))
+}
+
+/// zcode CLI 各会话的工具调用结果缓存目录（artifacts/sess_*/call_*.json）
+pub fn cli_artifacts_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".zcode").join("cli").join("artifacts"))
+}
+
+/// zcode CLI 各会话的命令执行日志目录（exec/sess_*/call_*-stdout.log）
+pub fn cli_exec_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".zcode").join("cli").join("exec"))
+}
+
 /// zcode 界面的任务索引库（tasks 表：archived / deleted 等界面级标记，
 /// 「归档会话」的真实存储位置，与会话库按 task_id = session.id 关联）
 pub fn tasks_index_db_path() -> Option<PathBuf> {
