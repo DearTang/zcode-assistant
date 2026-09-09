@@ -17,7 +17,8 @@ import {
   IconMoon,
   IconPower,
 } from "./icons";
-import { win, app } from "../api";
+import { win, app, zcode } from "../api";
+import { toast } from "./Toast";
 
 interface NavEntry {
   id: ViewId;
@@ -55,6 +56,19 @@ export function Sidebar({
 }: SidebarProps) {
   const { theme, toggle } = useTheme();
   const [version, setVersion] = useState("");
+  const [restarting, setRestarting] = useState(false);
+
+  const restartZcode = async () => {
+    setRestarting(true);
+    try {
+      await zcode.restartZcode();
+      toast.success("ZCode 已重启");
+    } catch (e: unknown) {
+      toast.error(typeof e === "string" ? e : "重启失败");
+    } finally {
+      setRestarting(false);
+    }
+  };
 
   useEffect(() => {
     app.getVersion().then(setVersion).catch(() => {});
@@ -99,6 +113,11 @@ export function Sidebar({
           );
         })}
       </nav>
+
+      <button className="za-nav-item" disabled={restarting} onClick={restartZcode}>
+        <IconPower width={18} height={18} />
+        {restarting ? "重启中…" : "重启 ZCode"}
+      </button>
 
       <div className="za-sidebar-foot">
         <button className="za-nav-item" onClick={toggle}>
