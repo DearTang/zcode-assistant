@@ -163,6 +163,11 @@ pub fn run() {
             commands::import_cmd::import_providers_from,
             commands::import_cmd::resolve_import_contexts,
             commands::import_cmd::pick_config_file,
+            // Oh My Pi 原生 models.json 双向同步
+            commands::omp_sync_cmd::omp_import_preview,
+            commands::omp_sync_cmd::import_providers_from_omp,
+            commands::omp_sync_cmd::omp_export_preview,
+            commands::omp_sync_cmd::export_providers_to_omp,
             // 反向同步（导出到 opencode / cc-switch）
             commands::export_cmd::export_preview,
             commands::export_cmd::export_providers_to,

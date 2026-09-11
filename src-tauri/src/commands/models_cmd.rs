@@ -317,6 +317,11 @@ pub fn apply_models(provider_key: String, specs: Vec<ModelSpec>) -> Result<usize
             .entry(s.id.clone())
             .or_insert_with(|| json!({}));
         if let Some(obj) = entry.as_object_mut() {
+            if let Some(name) = &s.name {
+                if !name.trim().is_empty() {
+                    obj.insert("name".to_string(), json!(name));
+                }
+            }
             let limit = obj
                 .entry("limit".to_string())
                 .or_insert_with(|| json!({}));

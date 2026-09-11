@@ -6,6 +6,7 @@ pub mod export_cmd;
 pub mod health_cmd;
 pub mod import_cmd;
 pub mod models_cmd;
+pub mod omp_sync_cmd;
 pub mod prefs_cmd;
 pub mod proxy_cmd;
 pub mod quota_cmd;

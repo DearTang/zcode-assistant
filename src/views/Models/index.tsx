@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   importer,
   exporter,
+  ompSync,
   models,
   zcode,
   quota,
@@ -113,6 +114,9 @@ export default function Models({
   // 反向同步（zcode → cc-switch 的 opencode 供应商组）
   const [expPreview, setExpPreview] = useState<ExportPreview[] | null>(null);
   const [expOutcome, setExpOutcome] = useState<ExportOutcome | null>(null);
+  // 反向同步（zcode → Oh My Pi 原生 models.json）
+  const [ompExpPreview, setOmpExpPreview] = useState<ExportPreview[] | null>(null);
+  const [ompExpOutcome, setOmpExpOutcome] = useState<ExportOutcome | null>(null);
   // 本次会话新导入的 provider key（仅内存，退出应用即清，用于 NEW 标记）
   const [newKeys, setNewKeys] = useState<Set<string>>(() => new Set());
   // 双击打开的供应商编辑弹窗 key
@@ -286,7 +290,9 @@ export default function Models({
   const handleImport = async () => {
     setBusy(true);
     try {
-      const items = await importer.preview(impSource, impPath.trim() || undefined);
+      const items = impSource === "omp"
+        ? await ompSync.importPreview(impPath.trim() || undefined)
+        : await importer.preview(impSource, impPath.trim() || undefined);
       setImpPreview(items);
     } catch (e: unknown) {
       toast.error(typeof e === "string" ? e : "解析配置失败");
@@ -304,13 +310,15 @@ export default function Models({
   ) => {
     setBusy(true);
     try {
-      const results = await importer.from(
-        impSource,
-        impPath.trim() || undefined,
-        ids,
-        refetch,
-        overrides
-      );
+      const results = impSource === "omp"
+        ? await ompSync.importProviders(impPath.trim() || undefined, ids)
+        : await importer.from(
+            impSource,
+            impPath.trim() || undefined,
+            ids,
+            refetch,
+            overrides
+          );
       setImpPreview(null);
       setImpResults(results);
       // 记录新导入的 provider key（仅 success），用于本次会话 NEW 标记
@@ -347,7 +355,7 @@ export default function Models({
   // 预览弹窗确认：开关关闭直接导入；开启先目录匹配，
   // 未命中的弹窗让用户逐个确认（默认 200k）后再导入
   const handleImportConfirm = async (ids: string[]) => {
-    if (!impRefetchCtx) {
+    if (impSource === "omp" || !impRefetchCtx) {
       await runImport(ids, false);
       return;
     }
@@ -422,6 +430,37 @@ export default function Models({
     }
   };
 
+  const handleOmpExport = async () => {
+    setBusy(true);
+    setOmpExpOutcome(null);
+    try {
+      setOmpExpPreview(await ompSync.exportPreview());
+    } catch (e: unknown) {
+      toast.error(typeof e === "string" ? e : "解析 Oh My Pi 配置失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleOmpExportConfirm = async (ids: string[]) => {
+    setBusy(true);
+    try {
+      const outcome = await ompSync.exportProviders(ids);
+      setOmpExpPreview(null);
+      setOmpExpOutcome(outcome);
+      const added = outcome.results.filter((r) => r.status === "success");
+      const updated = outcome.results.filter((r) => r.status === "updated");
+      if (added.length > 0) toast.success(`已新增 ${added.length} 个供应商到 Oh My Pi`);
+      if (updated.length > 0) toast.success(`已覆盖更新 ${updated.length} 个供应商`);
+      if (outcome.warning) toast.warning(outcome.warning);
+      if (added.length === 0 && updated.length === 0) toast.error("未成功同步任何供应商");
+    } catch (e: unknown) {
+      toast.error(typeof e === "string" ? e : "同步 Oh My Pi 失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleRemove = (key: string) =>
     run(async () => {
       await models.removeProvider(key);
@@ -468,7 +507,7 @@ export default function Models({
           className="za-muted"
           style={{ margin: "0 0 10px", fontSize: "var(--fs-sm)" }}
         >
-          从 opencode / Claude Code / Codex 配置文件导入 provider。留空路径用各工具默认位置；也可手动指定。
+          从 opencode / Claude Code / Codex / Oh My Pi 配置文件导入 provider。留空路径用各工具默认位置；也可手动指定。
         </p>
         <div className="za-row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <select
@@ -481,6 +520,7 @@ export default function Models({
             <option value="claude">Claude Code (settings.json)</option>
             <option value="codex">Codex (config.toml)</option>
             <option value="zcode">ZCode (config.json)</option>
+            <option value="omp">Oh My Pi (models.json)</option>
           </select>
           <div
             className="za-input za-btn-sm"
@@ -521,14 +561,16 @@ export default function Models({
               <IconClose width={13} height={13} />
             </button>
           )}
-          <label
-            className="za-row"
-            style={{ gap: 6, alignItems: "center", fontSize: "var(--fs-sm)", cursor: "pointer" }}
-            title="开启后本次导入按 OpenRouter 目录 / 内置规格表匹配真实上下文并覆盖旧值；未命中的模型弹窗逐个确认（默认 200k，可修改）。仅当次生效，导入完成后自动关闭"
-          >
-            <Switch on={impRefetchCtx} onChange={setImpRefetchCtx} />
-            重新获取上下文
-          </label>
+          {impSource !== "omp" && (
+            <label
+              className="za-row"
+              style={{ gap: 6, alignItems: "center", fontSize: "var(--fs-sm)", cursor: "pointer" }}
+              title="开启后本次导入按 OpenRouter 目录 / 内置规格表匹配真实上下文并覆盖旧值；未命中的模型弹窗逐个确认（默认 200k，可修改）。仅当次生效，导入完成后自动关闭"
+            >
+              <Switch on={impRefetchCtx} onChange={setImpRefetchCtx} />
+              重新获取上下文
+            </label>
+          )}
           <button
             className="za-btn za-btn-sm za-btn-primary"
             disabled={busy}
@@ -685,6 +727,82 @@ export default function Models({
                     <span style={{ color: "var(--text-primary)" }}>
                       {r.name}
                     </span>
+                    <span className="za-muted">— {r.message}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })()}
+      </div>
+
+      <div className="za-panel za-card-pad">
+        <div className="za-section-title">
+          <h3>同步到 Oh My Pi</h3>
+        </div>
+        <p
+          className="za-muted"
+          style={{ margin: "0 0 10px", fontSize: "var(--fs-sm)" }}
+        >
+          把 zcode 的自定义供应商和模型同步到 Oh My Pi 原生
+          <code>~/.pi/agent/models.json</code>。baseUrl + apiKey 一致的条目覆盖更新，其余新增；写入前自动创建
+          <code>models.json.bak</code>。不会修改 <code>settings.json</code> 的默认供应商或模型。
+        </p>
+        <div className="za-row" style={{ gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button
+            className="za-btn za-btn-sm za-btn-primary"
+            disabled={busy}
+            onClick={handleOmpExport}
+          >
+            同步到 Oh My Pi
+          </button>
+        </div>
+        {ompExpOutcome && ompExpOutcome.results.length > 0 && (() => {
+          const succ = ompExpOutcome.results.filter((r) => r.status === "success");
+          const upd = ompExpOutcome.results.filter((r) => r.status === "updated");
+          const fail = ompExpOutcome.results.filter((r) => r.status === "failed");
+          return (
+            <div style={{ marginTop: 10 }}>
+              <div className="za-row" style={{ gap: 14, fontSize: "var(--fs-sm)" }}>
+                <span style={{ color: "var(--accent)" }}>✓ 新增 {succ.length}</span>
+                <span style={{ color: "var(--accent)" }}>↻ 覆盖 {upd.length}</span>
+                <span style={{ color: "#ef4444" }}>✕ 失败 {fail.length}</span>
+              </div>
+              {ompExpOutcome.warning && (
+                <div className="za-muted" style={{ fontSize: "var(--fs-xs)", marginTop: 6 }}>
+                  ⚠ {ompExpOutcome.warning}
+                </div>
+              )}
+              <div
+                className="za-mono"
+                style={{
+                  fontSize: "var(--fs-xs)",
+                  marginTop: 6,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 3,
+                }}
+              >
+                {[...succ, ...upd, ...fail].map((r, i) => (
+                  <div
+                    // eslint-disable-next-line react/no-array-index-key
+                    key={`${r.name}-${i}`}
+                    className="za-row"
+                    style={{ gap: 6 }}
+                  >
+                    <span
+                      style={{
+                        color:
+                          r.status === "failed"
+                            ? "#ef4444"
+                            : r.status === "updated"
+                              ? "var(--accent)"
+                              : "var(--text-tertiary)",
+                      }}
+                    >
+                      {r.status === "failed" ? "✕" : r.status === "updated" ? "↻" : "✓"}
+                    </span>
+                    <span style={{ color: "var(--text-primary)" }}>{r.name}</span>
                     <span className="za-muted">— {r.message}</span>
                   </div>
                 ))}
@@ -1099,17 +1217,28 @@ export default function Models({
           onConfirm={handleExportConfirm}
         />
       )}
+      {ompExpPreview && (
+        <ExportPreviewModal
+          title="同步到 Oh My Pi"
+          items={ompExpPreview}
+          busy={busy}
+          onClose={() => setOmpExpPreview(null)}
+          onConfirm={handleOmpExportConfirm}
+        />
+      )}
     </>
   );
 }
 
 /* ============ 同步到 cc-switch：预览弹窗（默认勾选 zcode 中启用的供应商）============ */
 function ExportPreviewModal({
+  title = "同步到 cc-switch",
   items,
   busy,
   onClose,
   onConfirm,
 }: {
+  title?: string;
   items: ExportPreview[];
   busy: boolean;
   onClose: () => void;
@@ -1137,7 +1266,7 @@ function ExportPreviewModal({
         <div className="za-modal-header">
           <div className="za-row" style={{ gap: 8, alignItems: "center" }}>
             <h3 style={{ margin: 0, fontSize: "var(--fs-lg)", fontWeight: 600 }}>
-              同步到 cc-switch
+              {title}
             </h3>
             <span className="za-muted" style={{ fontSize: "var(--fs-sm)" }}>
               共 {items.length} 个可导出供应商

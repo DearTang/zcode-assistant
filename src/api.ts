@@ -541,6 +541,21 @@ export const exporter = {
     invoke<ExportOutcome>("export_providers_to", { selected }),
 };
 
+/* ============ Oh My Pi 原生 models.json 双向同步 ============ */
+export const ompSync = {
+  /** 预览 Oh My Pi 的 providers，未写入 ZCode */
+  importPreview: (path?: string) =>
+    invoke<ProviderPreview[]>("omp_import_preview", { path }),
+  /** 将选中的 Oh My Pi providers 导入 ZCode */
+  importProviders: (path?: string, selected?: string[]) =>
+    invoke<ImportResult[]>("import_providers_from_omp", { path, selected }),
+  /** 预览 ZCode providers 到 Oh My Pi 的覆盖关系，未写入 */
+  exportPreview: () => invoke<ExportPreview[]>("omp_export_preview"),
+  /** 将选中的 ZCode providers 写入 ~/.pi/agent/models.json */
+  exportProviders: (selected?: string[]) =>
+    invoke<ExportOutcome>("export_providers_to_omp", { selected }),
+};
+
 /* ============ 当前模型可用性检测 ============ */
 export const health = {
   /**

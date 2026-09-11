@@ -83,6 +83,7 @@ fn resolve_path(source: &str, path: Option<&str>) -> Result<PathBuf, String> {
         "claude" => home.join(".claude").join("settings.json"),
         "codex" => home.join(".codex").join("config.toml"),
         "zcode" => home.join(".zcode").join("v2").join("config.json"),
+        "omp" => home.join(".pi").join("agent").join("models.json"),
         _ => return Err(format!("不支持的来源或需手动指定路径: {source}")),
     })
 }
@@ -333,6 +334,7 @@ fn resolve_default_dir(source: &str, path: Option<&str>) -> Option<PathBuf> {
         "claude" => home.join(".claude"),
         "codex" => home.join(".codex"),
         "zcode" => home.join(".zcode").join("v2"),
+        "omp" => home.join(".pi").join("agent"),
         _ => home,
     })
 }
