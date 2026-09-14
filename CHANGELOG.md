@@ -27,6 +27,7 @@
 - 确认交互统一为 `confirmDialog()`（Promise 式）：项目批量删除 / 清理缓存、账号切换、Beautify 还原与模板删除不再使用原生 `confirm()`。
 - 依赖变更：移除 react / react-dom / react-markdown / remark-gfm，新增 vue / element-plus / vue-i18n / myui / markdown-it；`npm run test:ts` 由 `tsc` 改为 `vue-tsc`。
 - myui 升级至 v0.10.0 并回落框架能力：删除本地图标运行时注册（应用图标集已收编进 myui 内置白名单）与 5 个本地兜底组件（配额进度条 / 双环 / 滑杆单位后缀 / 颜色字段 / 行内编辑），改用框架 `MyProgress`（阈值分档）、`MyDualRing`、`MySlider :unit`、`MyColorField`、`MyInlineEdit`；分组下拉改 `MySelect :groups`，表头半选改 `MyCheckbox :indeterminate`，弹窗错误横幅改 `MyDialog :error`，清理缓存确认按钮启用 `confirmDisabled`。
+- myui 升级至 v0.12.0（补丁跟进）：修复命令面板打开后面板不可见（0×0）与 `MyDualRing` 内环分档失效 / 误继承外环分档色两个阻塞级缺陷，两者均为本项目在用组件；新增能力（MyVideoPlayer / MyDanmaku / MySettingsPanel / MyCombobox / promptDialog / toast action）暂无对应场景，未接入。
 
 ### 🐛 修复
 

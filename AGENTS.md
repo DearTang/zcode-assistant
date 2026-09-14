@@ -19,7 +19,7 @@ Full app（从 `src-tauri/`）：
 - `cargo tauri build` / `npm run tauri:build` — 构建 NSIS 安装包（会先调 `beforeBuildCommand`，即 `npm run build`）
 - `cargo check` — 快速类型/错误检查（无产物）
 
-UI 框架约定：组件库为 **myui**（`myui@git+https://gitee.com/argustang/my-ui.git#v0.10.0`，Vue 3 + Element Plus 封装层，git 依赖随 tag 分发 dist）；壳层布局/令牌对齐 `F:\workProject\personProject\unified-ui-vue` 模板（五区壳层、`html.dark/html.light` 双主题、颜色一律 var() 引 myui token）。应用图标集已收编进 myui 内置白名单，直接 `<MyIcon name="..."/>` 使用（注意是单数 `Setting`）。剩余缺口与未采纳项见 `docs/myui-缺口反馈清单.md`；仅存的业务兜底件为 `src/components/fields/WeekdayPicker.vue`。**不要修改 myui 本身**——缺口汇总后由维护者更新框架。
+UI 框架约定：组件库为 **myui**（`myui@git+https://gitee.com/argustang/my-ui.git#v0.12.0`，Vue 3 + Element Plus 封装层，git 依赖随 tag 分发 dist）；壳层布局/令牌对齐 `F:\workProject\personProject\unified-ui-vue` 模板（五区壳层、`html.dark/html.light` 双主题、颜色一律 var() 引 myui token）。应用图标集已收编进 myui 内置白名单，直接 `<MyIcon name="..."/>` 使用（注意是单数 `Setting`）。剩余缺口与未采纳项见 `docs/myui-缺口反馈清单.md`；仅存的业务兜底件为 `src/components/fields/WeekdayPicker.vue`。**不要修改 myui 本身**——缺口汇总后由维护者更新框架。
 
 版本号单一真相源：`src-tauri/Cargo.toml` 的 `version`；`npm run version:sync`（`scripts/sync-version.mjs`）会把它同步到 `package.json` / `package-lock.json`。`tauri.conf.json` 无 version 字段——Tauri v2 直接读 Cargo.toml。
 
