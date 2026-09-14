@@ -2,7 +2,7 @@
 
 > zcode 使用增强工具：配额监控、模型管理、自动切换、悬浮球、账号切换、用量统计。
 
-一个基于 **Tauri 2 + React 18 + TypeScript + Vite** 的桌面应用，采用 Sequoia-X 液态玻璃设计风格，所有数据本地读写 `~/.zcode/v2`，不外传。
+一个基于 **Tauri 2 + Vue 3 + myui + TypeScript + Vite** 的桌面应用，采用统一界面方案（myui 设计令牌 · OKLCH 液态玻璃 · 深/浅双主题），所有数据本地读写 `~/.zcode/v2`，不外传。
 
 ## ✨ 功能特性
 
@@ -47,7 +47,7 @@ npm run tauri:build      # 产物在 src-tauri/target/release/bundle/
 
 ## 🧱 技术栈
 
-- **前端**：React 18 · TypeScript · Vite 6
+- **前端**：Vue 3 · myui（统一组件库，git 依赖）· Element Plus · TypeScript · Vite 6
 - **后端**：Rust · Tauri 2
 - **存储**：SQLite（rusqlite，bundled）+ 系统 keyring（凭证安全）
 - **加密**：AES-256-GCM（zcode `credentials.json` 的 `enc:v1` 解密）
@@ -107,10 +107,13 @@ npm run release:github -- <version> <notes.md>
 
 ```
 zcode-assistant/
-├── src/                    # 前端（React + TS）
-│   ├── views/              # 各功能页面
-│   ├── components/         # 复用组件（弹窗、图标、进度等）
-│   ├── hooks/              # 自定义 hooks（主题、更新检查）
+├── src/                    # 前端（Vue 3 + TS）
+│   ├── views/              # 各功能页面（每个视图一个目录）
+│   ├── components/         # 复用组件（壳层、弹窗、字段件、配额环等）
+│   ├── composables/        # 组合式函数（toast、换肤、更新检查）
+│   ├── store/              # 轻量全局状态（主题 / 布局偏好）
+│   ├── icons/              # 自绘 SVG 图标（注册进 myui 图标白名单）
+│   ├── i18n/               # vue-i18n（仅承载 myui 库词条）
 │   ├── lib/                # 工具库（使用统计等）
 │   └── api.ts              # Tauri command 调用封装
 ├── src-tauri/              # 后端（Rust + Tauri）
@@ -131,6 +134,14 @@ zcode-assistant/
 ## 🔄 更新日志
 
 完整版本历史见 [CHANGELOG.md](./CHANGELOG.md)。最新版要点摘录：
+
+### 未发布
+
+**新增**：主界面接入命令面板（Ctrl/Cmd+K 唤起），按关键词搜索并跳转全部功能页。
+
+**变更**：前端整体迁移到统一界面方案——React 18 → Vue 3 + myui 组件库（v0.7.0），壳层布局对齐 unified-ui 模板（顶栏 + 可折叠侧栏 + 内容区 + Overlay 层），全部页面 / 弹窗 / 表单改用 myui 组件与统一设计令牌（OKLCH 液态玻璃、`html.dark/html.light` 双主题）· 主题系统升级为三态（深色 / 浅色 / 跟随系统），旧主题偏好自动迁移 · 「外观定制」换肤在统一令牌体系上重写，存量偏好无缝沿用 · 模型管理页巨石拆解（3838 行单文件 → 主视图 + 5 个弹窗子组件 + 配额行组件），行为不变 · 确认交互统一为 Promise 式 `confirmDialog()`，不再使用原生 `confirm()` · 依赖变更：移除 React 全家桶，新增 vue / element-plus / vue-i18n / myui / markdown-it；`npm run test:ts` 改为 `vue-tsc`。
+
+**修复**：Beautify 状态徽标引用了不存在的 `za-badge-success` 类（改用 myui `MyBadge` success 变体）。
 
 ### v0.11.0 (2026-09-11)
 

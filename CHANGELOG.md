@@ -1,7 +1,7 @@
 <!--
   本文件同时服务于两处：
   1. 仓库维护者：发版前在 [未发布] 下累积条目，发版时改为版本号 + 日期；
-  2. 应用内「关于」弹窗：构建期以 `?raw` 打包进前端（src/components/AboutDialog.tsx），
+  2. 应用内「关于」弹窗：构建期以 `?raw` 打包进前端（src/components/AboutDialog.vue），
      离线展示更新日志。HTML 注释与多余空行会在渲染前被剥离。
   格式基于 Keep a Changelog（https://keepachangelog.com/zh-CN/1.1.0/），
   版本号遵循语义化版本（https://semver.org/lang/zh-CN/）。
@@ -16,9 +16,21 @@
 
 ### ✨ 新增
 
+- 主界面接入命令面板（Ctrl/Cmd+K 唤起）：可按关键词搜索并跳转全部 10 个功能页。
+
 ### 🛠️ 变更
 
+- 前端整体迁移到统一界面方案：React 18 → Vue 3 + myui 组件库（Gitee `argustang/my-ui` v0.7.0，git 依赖），壳层布局对齐 unified-ui 模板（顶栏 + 可折叠侧栏 + 内容区 + Overlay 层），全部页面/弹窗/表单改用 myui 组件与统一设计令牌（OKLCH + 毛玻璃、`html.dark/html.light` 双主题）。
+- 主题系统升级为三态（深色 / 浅色 / 跟随系统），侧边栏与顶栏均提供快捷切换；旧主题偏好（`za-theme`）自动迁移。
+- 「设置 → 外观定制」换肤（强调色色相 / 表面透明度 / 背景图）在统一令牌体系上重写，存量偏好（`za-appearance`）无缝沿用。
+- 巨石拆解：模型管理页由 3838 行单文件拆为主视图 + 编辑弹窗 + 5 个弹窗子组件 + 配额行组件，行为不变。
+- 确认交互统一为 `confirmDialog()`（Promise 式）：项目批量删除 / 清理缓存、账号切换、Beautify 还原与模板删除不再使用原生 `confirm()`。
+- 依赖变更：移除 react / react-dom / react-markdown / remark-gfm，新增 vue / element-plus / vue-i18n / myui / markdown-it；`npm run test:ts` 由 `tsc` 改为 `vue-tsc`。
+- myui 升级至 v0.10.0 并回落框架能力：删除本地图标运行时注册（应用图标集已收编进 myui 内置白名单）与 5 个本地兜底组件（配额进度条 / 双环 / 滑杆单位后缀 / 颜色字段 / 行内编辑），改用框架 `MyProgress`（阈值分档）、`MyDualRing`、`MySlider :unit`、`MyColorField`、`MyInlineEdit`；分组下拉改 `MySelect :groups`，表头半选改 `MyCheckbox :indeterminate`，弹窗错误横幅改 `MyDialog :error`，清理缓存确认按钮启用 `confirmDisabled`。
+
 ### 🐛 修复
+
+- 设置页「外观」主题按钮选中态样式笔误；Beautify 状态徽标引用了不存在的 `za-badge-success` 类（现改用 myui `MyBadge` 的 success 变体）。
 
 ## v0.11.0 - 2026-09-11
 

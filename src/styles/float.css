@@ -1,5 +1,5 @@
 /*
- * 悬浮球 + 展开面板样式
+ * 悬浮球 + 展开面板样式（token 引用 myui/styles；字号用字面值——myui 无 --fs-* 运行时变量）
  * 注意透明窗口的关键陷阱（来自 rocketdl 经验）：
  *  1. body 背景必须 alpha≠0（rgba 0.006 视觉不可见但保留 hit-test，否则窗口穿透）
  *  2. 不用 backdrop-filter（透明 WebView2 上会出现方形模糊块）
@@ -10,7 +10,7 @@
 /* ===== 悬浮球窗口 ===== */
 html.za-floatball,
 html.za-floatball body,
-html.za-floatball #root {
+html.za-floatball #app {
   background: transparent !important;
   overflow: hidden;
   width: 100px !important;
@@ -22,12 +22,6 @@ html.za-floatball #root {
 html.za-floatball body {
   background-color: rgba(0, 0, 0, 0.006) !important;
   transition: none !important;
-}
-/* 禁用 global.css 的漂移光晕伪元素 —— 它们在 64x64 透明窗口里会填满成彩色方形背景 */
-html.za-floatball body::before,
-html.za-floatball body::after,
-html.za-floatball #root::before {
-  display: none !important;
 }
 
 .fb-ball {
@@ -118,7 +112,7 @@ html.za-floatball #root::before {
   stroke-linecap: round;
   stroke-dasharray: 175.93;
   stroke-dashoffset: 175.93;
-  transition: stroke-dashoffset 0.5s var(--ease-out);
+  transition: stroke-dashoffset 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
   filter: drop-shadow(0 0 4px oklch(0.72 0.15 180 / 0.6));
 }
 .fb-center {
@@ -181,7 +175,7 @@ html.za-floatball #root::before {
 /* ===== 展开面板窗口 ===== */
 html.za-floatpanel,
 html.za-floatpanel body,
-html.za-floatpanel #root {
+html.za-floatpanel #app {
   margin: 0;
   padding: 0;
   width: 100%;
@@ -191,11 +185,6 @@ html.za-floatpanel #root {
 }
 html.za-floatpanel body {
   background-color: transparent;
-}
-html.za-floatpanel body::before,
-html.za-floatpanel body::after,
-html.za-floatpanel #root::before {
-  display: none !important;
 }
 .fp-root {
   width: 100%;
@@ -225,14 +214,14 @@ html.za-floatpanel #root::before {
 }
 .fp-title {
   font-weight: 600;
-  font-size: var(--fs-md);
+  font-size: 13px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 /* 固定态徽标（面板常驻，点击窗口外不收起） */
 .fp-pin-badge {
-  font-size: var(--fs-xs);
+  font-size: 11px;
   font-weight: 400;
   color: var(--accent);
   border: 1px solid var(--accent);
@@ -264,11 +253,11 @@ html.za-floatpanel #root::before {
   gap: 2px;
 }
 .fp-row-label {
-  font-size: var(--fs-xs);
+  font-size: 11px;
   color: var(--text-tertiary);
 }
 .fp-row-value {
-  font-size: var(--fs-sm);
+  font-size: 12px;
   font-family: var(--font-mono);
 }
 .fp-quota {
@@ -276,6 +265,6 @@ html.za-floatpanel #root::before {
 }
 .fp-row-sub {
   color: var(--text-tertiary);
-  font-size: var(--fs-xs);
+  font-size: 11px;
   font-weight: 400;
 }

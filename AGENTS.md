@@ -4,20 +4,22 @@
 
 ## Project
 
-zcode-assistant 是面向 zcode CLI 的桌面增强工具（Tauri v2 + React + TypeScript），包含配额监控、模型管理、自动切换、悬浮球、智谱账号切换、项目/会话管理等功能。
+zcode-assistant 是面向 zcode CLI 的桌面增强工具（Tauri v2 + Vue 3 + myui + TypeScript），包含配额监控、模型管理、自动切换、悬浮球、智谱账号切换、项目/会话管理等功能。
 
 ## Commands（与现有 npm scripts 对齐）
 
 Frontend:
 - `npm run dev` — Vite dev server
-- `npm run build` — 同步版本号 + `tsc` + `vite build`，产物输出到 `dist/`
-- `npm run test:ts` — `tsc --noEmit` 类型检查
+- `npm run build` — 同步版本号 + `vue-tsc` + `vite build`，产物输出到 `dist/`
+- `npm run test:ts` — `vue-tsc --noEmit` 类型检查
 - `npm run preview` — 预览生产构建
 
 Full app（从 `src-tauri/`）：
 - `cargo tauri dev` / `npm run tauri:dev` — 启动桌面应用 + HMR
 - `cargo tauri build` / `npm run tauri:build` — 构建 NSIS 安装包（会先调 `beforeBuildCommand`，即 `npm run build`）
 - `cargo check` — 快速类型/错误检查（无产物）
+
+UI 框架约定：组件库为 **myui**（`myui@git+https://gitee.com/argustang/my-ui.git#v0.10.0`，Vue 3 + Element Plus 封装层，git 依赖随 tag 分发 dist）；壳层布局/令牌对齐 `F:\workProject\personProject\unified-ui-vue` 模板（五区壳层、`html.dark/html.light` 双主题、颜色一律 var() 引 myui token）。应用图标集已收编进 myui 内置白名单，直接 `<MyIcon name="..."/>` 使用（注意是单数 `Setting`）。剩余缺口与未采纳项见 `docs/myui-缺口反馈清单.md`；仅存的业务兜底件为 `src/components/fields/WeekdayPicker.vue`。**不要修改 myui 本身**——缺口汇总后由维护者更新框架。
 
 版本号单一真相源：`src-tauri/Cargo.toml` 的 `version`；`npm run version:sync`（`scripts/sync-version.mjs`）会把它同步到 `package.json` / `package-lock.json`。`tauri.conf.json` 无 version 字段——Tauri v2 直接读 Cargo.toml。
 
