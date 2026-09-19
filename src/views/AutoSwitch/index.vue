@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { MyBadge, MyButton, MyDialog, MyFieldShell, MyIcon, MyInput, MyPanel, MyResultState, MySelect, MyToggle } from 'myui'
+import { MyButton, MyDialog, MyFieldShell, MyIcon, MyInput, MyPanel, MyResultState, MySelect, MyTag, MyToggle } from 'myui'
 import WeekdayPicker from '@/components/fields/WeekdayPicker.vue'
 import { autoswitch as sw, zcode } from '@/api'
 import { toast } from '@/composables/toast'
@@ -316,13 +316,13 @@ function fmtLogTime(iso: string): string {
         >
           <div class="as-row-main">
             <span class="as-grip" title="拖动调整优先级">⠿</span>
-            <MyBadge :value="String(idx + 1)" type="info" />
+            <MyTag type="info" size="small" round>{{ idx + 1 }}</MyTag>
             <div class="as-row-copy">
               <div class="as-row-title">
                 {{ r.name }}
-                <MyBadge :value="kindBadge(r.kind)" type="info" />
-                <MyBadge v-if="r.projectDir" :value="baseName(r.projectDir)" type="info" />
-                <MyBadge v-if="r.switchPrimary" value="同步主供应" type="info" />
+                <MyTag type="info" size="small" round>{{ kindBadge(r.kind) }}</MyTag>
+                <MyTag v-if="r.projectDir" type="info" size="small" round>{{ baseName(r.projectDir) }}</MyTag>
+                <MyTag v-if="r.switchPrimary" type="info" size="small" round>同步主供应</MyTag>
               </div>
               <div class="as-row-sub">
                 {{

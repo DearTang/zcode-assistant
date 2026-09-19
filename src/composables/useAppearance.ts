@@ -178,6 +178,8 @@ export function initAppearance(): void {
       el.id = 'za-appearance-bg'
       document.body.appendChild(el)
     }
-    el.style.cssText = `position:fixed;inset:0;z-index:0;pointer-events:none;background:url("${bgState.dataUrl}") center / cover no-repeat;opacity:${appearance.bgOpacity};`
+    // z-index 必须为负：壳层无显式层叠上下文，0 会让本层（body 末尾、fixed）
+    // 在绘制顺序上盖住全部 static 内容（WebView2 实测整窗只剩壁纸）
+    el.style.cssText = `position:fixed;inset:0;z-index:-1;pointer-events:none;background:url("${bgState.dataUrl}") center / cover no-repeat;opacity:${appearance.bgOpacity};`
   })
 }

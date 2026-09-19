@@ -1,7 +1,7 @@
 {
   "name": "zcode-assistant",
   "private": true,
-  "version": "0.11.0",
+  "version": "0.12.0",
   "type": "module",
   "description": "zcode 使用增强工具：配额监控、模型管理、自动切换、悬浮球、账号切换",
   "scripts": {
@@ -22,7 +22,7 @@
     "@tauri-apps/api": "^2",
     "element-plus": "^2.14.5",
     "markdown-it": "^14.1.0",
-    "myui": "git+https://gitee.com/argustang/my-ui.git#v0.12.0",
+    "myui": "git+https://gitee.com/argustang/my-ui.git#v0.18.0",
     "vue": "^3.5.32",
     "vue-i18n": "^11.4.0"
   },

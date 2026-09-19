@@ -2,6 +2,38 @@
 
 > 项目：zcode-assistant 前端迁移（React → Vue 3 + myui，壳层对齐 unified-ui-vue 模板）
 > 初版：2026-09-13（v0.7.0 消费评估）；**更新：2026-09-13——myui v0.8.0~v0.10.0 已落实绝大部分条目，本项目已升级到 v0.10.0 并删除对应本地兜底**。每节标注落实状态。
+> **更新：2026-09-19——升级到 v0.18.0（跨 v0.13~v0.18），见下方「v0.18.0 升级核查」。**
+
+---
+
+## v0.18.0 升级核查（2026-09-19）
+
+**结论：类型检查与生产构建零错误，全部变更为纯增量，无破坏点，无需代码改动。**
+
+### 本次升级顺带修复的既有观感问题
+
+- **线性图标被宿主 CSS 灌成实心块**（v0.17.1，缺陷自 v0.9 起存在）：myui 的 `.my-icon :deep(svg){fill:currentColor}` 会覆盖 stroke 型图标 `fill="none"`。本项目侧栏在用 Dashboard / Chart / Swap / Globe / Sparkle / Sliders 等自绘线性图标，同受影响（此前不易察觉）；v0.17.1 起框架在 lineIcon 根节点加内联 `style="fill:none"`，升级即修复。
+- `MyDualRing` 引用不存在的 `var(--fs-xs)`（v0.14.0 修复）：此前静默回落 12px，恰好同值，对本项目无实际影响。
+
+### v0.13~v0.18 新增能力 × 本项目场景对照（均未接入，留作后续演进）
+
+| 新能力 | 本项目潜在场景 |
+|---|---|
+| MyDropdown（v0.14/0.15，含纯展示行） | 全项目 0 处 el-dropdown 手写用法，暂无场景 |
+| MyForm / MyFormItem（v0.16） | 设置中心多面板表单如需整体校验时可迁；当前多为零散字段（MyFieldRow 足够） |
+| MyUpload（v0.15） | 项目无上传场景 |
+| 媒体组件 myui/media（v0.13） | 项目无图片/视频/文件预览场景 |
+| MySettingsPanel `fill` 模式（v0.17） | 本项目设置页为自研布局（未用 MySettingsPanel），暂不迁移 |
+| AI/模型品牌图标 12 个（v0.14：Ai/Zhipu/Gpt/Claude/Kimi/Qwen/Doubao/MiniMax/Grok/Pi/Thinking/Terminal） | 模型管理页如需按供应商展示品牌图标可直接 `<MyIcon name="Zhipu"/>`；当前未使用 |
+| MyButton ghost 语义变体（v0.16） | 现仅 4 处纯 `variant="ghost"`；「找回/彻底删除」类低强调危险操作可用 `ghost-danger` |
+| 输入件 focus()/blur()（v0.16/0.18） | 全项目 0 处 `$el.querySelector` 聚焦兜底，暂无场景 |
+| MyDataTable 编程接口 / My*Props 类型导出（v0.18） | Projects 页选择状态为自管（非 el-table 实例操作），暂无场景 |
+| `--success/--warning/--danger/--info-subtle` 令牌（v0.14） | 本项目自管 `--accent-subtle`/`--border-subtle`；如需状态底色可用新令牌替代手写 rgba |
+
+### 仍维持原状的历史条目
+
+- 拖拽排序 / toast action / `--space-*` 运行时化：维持 0.9.0 Not adopted 结论。
+- element-theme tooltip/popover 观感：v0.11.2 已补齐，此前反馈关闭。
 
 ---
 

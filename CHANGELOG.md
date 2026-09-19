@@ -16,11 +16,19 @@
 
 ### ✨ 新增
 
+### 🛠️ 变更
+
+### 🐛 修复
+
+## v0.12.0 - 2026-09-19
+
+### ✨ 新增
+
 - 主界面接入命令面板（Ctrl/Cmd+K 唤起）：可按关键词搜索并跳转全部 10 个功能页。
 
 ### 🛠️ 变更
 
-- 前端整体迁移到统一界面方案：React 18 → Vue 3 + myui 组件库（Gitee `argustang/my-ui` v0.7.0，git 依赖），壳层布局对齐 unified-ui 模板（顶栏 + 可折叠侧栏 + 内容区 + Overlay 层），全部页面/弹窗/表单改用 myui 组件与统一设计令牌（OKLCH + 毛玻璃、`html.dark/html.light` 双主题）。
+- 前端整体迁移到统一界面方案：React 18 → Vue 3 + myui 组件库（Gitee `argustang/my-ui` v0.7.0 起，git 依赖），壳层布局对齐 unified-ui 模板（顶栏 + 可折叠侧栏 + 内容区 + Overlay 层），全部页面/弹窗/表单改用 myui 组件与统一设计令牌（OKLCH + 毛玻璃、`html.dark/html.light` 双主题）；新增《统一界面重构评估报告》《myui 缺口反馈清单》工程文档。
 - 主题系统升级为三态（深色 / 浅色 / 跟随系统），侧边栏与顶栏均提供快捷切换；旧主题偏好（`za-theme`）自动迁移。
 - 「设置 → 外观定制」换肤（强调色色相 / 表面透明度 / 背景图）在统一令牌体系上重写，存量偏好（`za-appearance`）无缝沿用。
 - 巨石拆解：模型管理页由 3838 行单文件拆为主视图 + 编辑弹窗 + 5 个弹窗子组件 + 配额行组件，行为不变。
@@ -28,10 +36,13 @@
 - 依赖变更：移除 react / react-dom / react-markdown / remark-gfm，新增 vue / element-plus / vue-i18n / myui / markdown-it；`npm run test:ts` 由 `tsc` 改为 `vue-tsc`。
 - myui 升级至 v0.10.0 并回落框架能力：删除本地图标运行时注册（应用图标集已收编进 myui 内置白名单）与 5 个本地兜底组件（配额进度条 / 双环 / 滑杆单位后缀 / 颜色字段 / 行内编辑），改用框架 `MyProgress`（阈值分档）、`MyDualRing`、`MySlider :unit`、`MyColorField`、`MyInlineEdit`；分组下拉改 `MySelect :groups`，表头半选改 `MyCheckbox :indeterminate`，弹窗错误横幅改 `MyDialog :error`，清理缓存确认按钮启用 `confirmDisabled`。
 - myui 升级至 v0.12.0（补丁跟进）：修复命令面板打开后面板不可见（0×0）与 `MyDualRing` 内环分档失效 / 误继承外环分档色两个阻塞级缺陷，两者均为本项目在用组件；新增能力（MyVideoPlayer / MyDanmaku / MySettingsPanel / MyCombobox / promptDialog / toast action）暂无对应场景，未接入。
+- myui 升级至 v0.18.0（跨 v0.13~v0.18 六个版本，官方声明全部向后兼容）：顺带修复侧栏自绘线性图标（Dashboard/Chart/Swap/Globe/Sliders 等）被宿主 CSS `fill:currentColor` 规则灌成实心块的潜在观感问题（v0.17.1，v0.9 起即存在）。新增可用能力本轮未接入、留作后续演进：下拉/右键菜单 MyDropdown、校验表单 MyForm/MyFormItem、上传队列 MyUpload、媒体组件（myui/media 子入口）、MySettingsPanel `fill` 填充模式、AI/模型品牌图标（Ai/Zhipu/Gpt/Claude 等 12 个）、MyButton ghost 语义色变体、输入件 `focus()/blur()` 契约、MyDataTable 编程接口转发、`--success/--warning/--danger/--info-subtle` 状态色令牌。
 
 ### 🐛 修复
 
-- 设置页「外观」主题按钮选中态样式笔误；Beautify 状态徽标引用了不存在的 `za-badge-success` 类（现改用 myui `MyBadge` 的 success 变体）。
+- 修复项目 / 模型 / 自动切换 / 账号 / 美化等页状态标签与文本重叠：`MyBadge` 是 el-badge 角标（内容绝对定位于宿主右上角，无插槽内容时悬浮在旁边元素上），迁移时被误用作内联状态药丸；全部改用 `MyTag`（el-tag 内联标签）。该问题自 Vue 3 迁移即存在，与 myui 版本无关。
+- 修复主窗口只显示背景图、整个界面不渲染的问题：「外观定制」背景图层为 `fixed + z-index:0` 且追加在 body 末尾，绘制顺序上会盖住无显式层叠上下文的界面内容（Vue 3 迁移引入的层叠缺陷，桌面 WebView2 实测暴露；浏览器预览不加载持久化壁纸故未发现）；背景图层改为 `z-index:-1` 固定置于最底层。
+- 设置页「外观」主题按钮选中态样式笔误；Beautify 状态徽标引用了不存在的 `za-badge-success` 类（现改用 myui `MyTag` 的 success 变体）。
 
 ## v0.11.0 - 2026-09-11
 

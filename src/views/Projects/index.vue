@@ -7,7 +7,7 @@
  * - 项目与会话均支持勾选批量归档（不删除，可恢复）与批量删除（级联清数据）。
  */
 import { computed, onMounted, ref, watch } from 'vue'
-import { confirmDialog, MyBadge, MyButton, MyCheckbox, MyDialog, MyIcon, MyInlineEdit, MyPanel, MyRadioGroup, MyResultState } from 'myui'
+import { confirmDialog, MyButton, MyCheckbox, MyDialog, MyIcon, MyInlineEdit, MyPanel, MyRadioGroup, MyResultState, MyTag } from 'myui'
 import RestartBar from '@/components/RestartBar.vue'
 import { projects as projectsApi, formatUnits } from '@/api'
 import { toast } from '@/composables/toast'
@@ -456,14 +456,16 @@ const cacheDayOptions = CACHE_OPTIONS.map((o) => ({ label: o.label, value: o.day
               <div class="pj-copy">
                 <div class="pj-name">
                   {{ baseName(p.directory) }}
-                  <MyBadge
-                    :value="p.archivedSessions >= p.sessions ? '归档' : '活跃'"
+                  <MyTag
                     :type="p.archivedSessions >= p.sessions ? 'info' : 'success'"
-                  />
-                  <MyBadge
-                    :value="`${p.sessions} 会话 · ${p.sessions - p.archivedSessions} 活跃 · ${p.archivedSessions} 归档`"
-                    type="info"
-                  />
+                    size="small"
+                    round
+                  >
+                    {{ p.archivedSessions >= p.sessions ? '归档' : '活跃' }}
+                  </MyTag>
+                  <MyTag type="info" size="small" round>
+                    {{ `${p.sessions} 会话 · ${p.sessions - p.archivedSessions} 活跃 · ${p.archivedSessions} 归档` }}
+                  </MyTag>
                 </div>
                 <div class="pj-dir" :title="p.directory">{{ p.directory }}</div>
               </div>
@@ -556,12 +558,15 @@ const cacheDayOptions = CACHE_OPTIONS.map((o) => ({ label: o.label, value: o.day
                           placeholder="输入会话名称"
                           @confirm="(v) => commitEdit(s.id, v)"
                         />
-                        <MyBadge v-if="s.titleSource === 'custom'" value="自定义" type="info" />
-                        <MyBadge
-                          :value="s.archived ? '归档' : '活跃'"
+                        <MyTag v-if="s.titleSource === 'custom'" type="info" size="small" round>自定义</MyTag>
+                        <MyTag
                           :type="s.archived ? 'info' : 'success'"
+                          size="small"
+                          round
                           :title="s.archived ? (s.timeArchivedMs ? `归档于 ${fmtTime(s.timeArchivedMs)}` : '已归档（zcode 任务索引）') : '活跃会话'"
-                        />
+                        >
+                          {{ s.archived ? '归档' : '活跃' }}
+                        </MyTag>
                       </span>
                     </td>
                     <td class="mono">{{ s.turns.toLocaleString() }}</td>

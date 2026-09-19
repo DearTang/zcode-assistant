@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { MyBadge, MyButton, MyCheckbox, MyDialog, MyFieldShell, MyIcon, MyInput, MySelect, MyToggle, notify } from 'myui'
+import { MyButton, MyCheckbox, MyDialog, MyFieldShell, MyIcon, MyInput, MySelect, MyTag, MyToggle, notify } from 'myui'
 import ModalModelRow from './ModalModelRow.vue'
 import { DEFAULT_CONTEXT, RESTART_HINT, detectCodingPlan } from '../shared'
 import { events, maskApiKey, models, openUrl, quotaToken, templates } from '@/api'
@@ -382,9 +382,9 @@ const tmplGroups = computed(() =>
     <div class="ed">
       <!-- 头部徽标 -->
       <div class="ed-head">
-        <MyBadge :value="provider.kind" type="info" />
-        <MyBadge v-if="isBuiltin" value="智谱CodingPlan" type="success" />
-        <MyBadge v-if="isCurrent" value="当前" type="primary" />
+        <MyTag type="info" size="small" round>{{ provider.kind }}</MyTag>
+        <MyTag v-if="isBuiltin" type="success" size="small" round>智谱CodingPlan</MyTag>
+        <MyTag v-if="isCurrent" type="primary" size="small" round>当前</MyTag>
       </div>
 
       <!-- 供应商信息 -->

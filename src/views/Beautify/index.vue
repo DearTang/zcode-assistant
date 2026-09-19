@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { confirmDialog, MyBadge, MyButton, MyColorField, MyInput, MyPanel, MySelect, MySlider, MyToggle } from 'myui'
+import { confirmDialog, MyButton, MyColorField, MyInput, MyPanel, MySelect, MySlider, MyTag, MyToggle } from 'myui'
 import { beautify as bf } from '@/api'
 import { toast } from '@/composables/toast'
 import type { BeautifyConfig, BeautifyPreset, BeautifyTemplate } from '@/types'
@@ -269,10 +269,9 @@ const monoFontOptions = MONO_FONTS.map((f) => ({ label: f.label, value: f.v }))
     <!-- 状态与还原 -->
     <MyPanel title="状态">
       <template #actions>
-        <MyBadge
-          :value="loading ? '检测中…' : installed ? '已注入美化' : '官方外观'"
-          :type="installed ? 'success' : 'info'"
-        />
+        <MyTag :type="installed ? 'success' : 'info'" size="small" round>
+          {{ loading ? '检测中…' : installed ? '已注入美化' : '官方外观' }}
+        </MyTag>
       </template>
       <p class="bf-desc">
         通过向 ZCode 的 <code>app.asar</code> 注入三个 <code>file://</code> 外链（变量 / 主题 / 运行时脚本）实现换肤、

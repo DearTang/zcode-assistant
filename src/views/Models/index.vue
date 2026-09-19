@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { MyBadge, MyButton, MyIcon, MyInput, MyPanel, MySelect, MyToggle, MyResultState } from 'myui'
+import { MyButton, MyIcon, MyInput, MyPanel, MySelect, MyTag, MyToggle, MyResultState } from 'myui'
 import RestartBar from '@/components/RestartBar.vue'
 import ProviderQuotaRow from './quotaRow.vue'
 import ExportPreviewModal from './modals/ExportPreviewModal.vue'
@@ -559,9 +559,9 @@ function lineClass(status: string): string {
                 <span class="md-provider-name">{{ builtinEntry[1].name }}</span>
                 <span class="md-provider-key">标识 {{ builtinEntry[0] }}</span>
               </div>
-              <MyBadge value="智谱CodingPlan" type="success" title="智谱 Coding Plan 订阅（登录态托管）" />
-              <MyBadge v-if="primary === builtinEntry[0]" value="主供应商" type="success" title="主供应商：总览 / 悬浮窗 / 托盘展示此供应商的配额" />
-              <MyBadge :value="builtinEntry[1].kind" type="info" />
+              <MyTag type="success" size="small" round title="智谱 Coding Plan 订阅（登录态托管）">智谱CodingPlan</MyTag>
+              <MyTag v-if="primary === builtinEntry[0]" type="success" size="small" round title="主供应商：总览 / 悬浮窗 / 托盘展示此供应商的配额">主供应商</MyTag>
+              <MyTag type="info" size="small" round>{{ builtinEntry[1].kind }}</MyTag>
             </div>
             <div class="md-provider-ops">
               <span class="md-faint">模型数：{{ Object.keys(builtinEntry[1].models).length }}</span>
@@ -639,10 +639,10 @@ function lineClass(status: string): string {
                 <span class="md-provider-name">{{ p.name }}</span>
                 <span class="md-provider-key">标识 {{ key }}</span>
               </div>
-              <MyBadge v-if="newKeys.has(key)" value="NEW" type="primary" />
-              <MyBadge v-if="primary === key" value="主供应商" type="success" title="主供应商：总览 / 悬浮窗 / 托盘展示此供应商的配额" />
-              <MyBadge :value="p.kind" type="info" />
-              <MyBadge v-if="p.source === 'custom'" value="自定义" type="primary" />
+              <MyTag v-if="newKeys.has(key)" type="primary" size="small" round>NEW</MyTag>
+              <MyTag v-if="primary === key" type="success" size="small" round title="主供应商：总览 / 悬浮窗 / 托盘展示此供应商的配额">主供应商</MyTag>
+              <MyTag type="info" size="small" round>{{ p.kind }}</MyTag>
+              <MyTag v-if="p.source === 'custom'" type="primary" size="small" round>自定义</MyTag>
             </div>
             <div class="md-provider-ops">
               <span class="md-faint" title="该供应商当前配置的模型数">模型数：{{ Object.keys(p.models).length }}</span>

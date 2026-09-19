@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { confirmDialog, MyBadge, MyButton, MyIcon, MyInlineEdit, MyInput, MyPanel } from 'myui'
+import { confirmDialog, MyButton, MyIcon, MyInlineEdit, MyInput, MyPanel, MyTag } from 'myui'
 import RestartBar from '@/components/RestartBar.vue'
 import { accounts as acc, events, scheduleZcodeReload } from '@/api'
 import { toast } from '@/composables/toast'
@@ -123,7 +123,7 @@ async function commitEdit(id: string, v: string): Promise<void> {
                   placeholder="输入账号别名"
                   @confirm="(v) => commitEdit(a.id, v)"
                 />
-                <MyBadge v-if="current?.id === a.id" value="当前" type="primary" />
+                <MyTag v-if="current?.id === a.id" type="primary" size="small" round>当前</MyTag>
               </div>
               <div class="ac-sub">{{ a.email || a.shortId || a.userId }} · {{ new Date(a.capturedAt).toLocaleString() }}</div>
             </div>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { MyBadge, MyButton, MyDialog, MyIcon } from 'myui'
+import { MyButton, MyDialog, MyIcon, MyTag } from 'myui'
 import { updater } from '@/api'
 import type { UpdateInfo } from '@/types'
 import { useUpdateDownload } from '@/composables/useUpdateDownload'
@@ -54,7 +54,7 @@ function openDownloadPage(): void {
       <div class="un-head">
         <div class="un-icon"><MyIcon name="Sparkle" :size="22" /></div>
         <strong>zcode-assistant 有新版本可用</strong>
-        <MyBadge :value="latestDisplay" type="primary" />
+        <MyTag type="primary" size="small" round>{{ latestDisplay }}</MyTag>
       </div>
 
       <p class="un-sub">
