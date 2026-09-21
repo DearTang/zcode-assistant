@@ -70,10 +70,20 @@ pub fn current_fingerprint() -> Option<(String, serde_json::Value)> {
     Some((uid, serde_json::Value::Object(info_map)))
 }
 
+/// 当前生效的 provider 配置文件路径：ZCode 3.14+ 为 provider_config.json，
+/// 旧版为 config.json（账号快照/回滚必须落在真正被读取的那个文件上）。
+fn active_config_path() -> Option<PathBuf> {
+    if crate::zcode::provider_config::is_active() {
+        crate::zcode::provider_config::personal_path()
+    } else {
+        paths::config_path()
+    }
+}
+
 /// 捕获当前 zcode 登录态为快照
 pub fn capture(db: &Database, data_dir: &Path, label: &str) -> Result<AccountMeta> {
     let cred_path = paths::credentials_path().ok_or_else(|| anyhow!("无 credentials 路径"))?;
-    let cfg_path = paths::config_path().ok_or_else(|| anyhow!("无 config 路径"))?;
+    let cfg_path = active_config_path().ok_or_else(|| anyhow!("无 config 路径"))?;
     let cred = std::fs::read_to_string(&cred_path)
         .with_context(|| format!("读取失败: {}", cred_path.display()))?;
     let cfg = std::fs::read_to_string(&cfg_path)
@@ -140,7 +150,7 @@ pub fn switch(db: &Database, data_dir: &Path, id: &str) -> Result<AccountMeta> {
         .ok_or_else(|| anyhow!("快照无 config"))?;
 
     let cred_path = paths::credentials_path().ok_or_else(|| anyhow!("无 credentials 路径"))?;
-    let cfg_path = paths::config_path().ok_or_else(|| anyhow!("无 config 路径"))?;
+    let cfg_path = active_config_path().ok_or_else(|| anyhow!("无 config 路径"))?;
     let v2 = paths::zcode_v2_dir().ok_or_else(|| anyhow!("无 v2 路径"))?;
 
     // 关闭运行中的 zcode（运行时改两文件不可靠）
@@ -152,33 +162,44 @@ pub fn switch(db: &Database, data_dir: &Path, id: &str) -> Result<AccountMeta> {
     if let Ok(b) = std::fs::read(&cred_path) {
         let _ = std::fs::write(last.join("credentials.json"), b);
     }
+    let cfg_name = cfg_path
+        .file_name()
+        .map(|s| s.to_os_string())
+        .unwrap_or_else(|| std::ffi::OsString::from("config.json"));
     if let Ok(b) = std::fs::read(&cfg_path) {
-        let _ = std::fs::write(last.join("config.json"), b);
+        let _ = std::fs::write(last.join(&cfg_name), b);
     }
 
     // 原子写回（失败回滚）
     // credentials 整体覆盖：登录态必须随账号切换
     if atomic_write(&cred_path, new_cred).is_err() {
-        rollback(&last, &cred_path, &cfg_path)?;
+        rollback(&last, &cred_path, &cfg_path, &cfg_name)?;
         return Err(anyhow!("写 credentials 失败，已回滚"));
     }
-    // config 合并：只换快照里的内置(builtin:)订阅 provider，保留自定义 provider
+    // config 合并：只换快照里的账号作用域订阅 provider，保留自定义 provider。
+    // 新格式（provider_config.json）与旧格式（config.json）合并规则不同，按当前生效格式分派。
     let merged_cfg = match std::fs::read_to_string(&cfg_path) {
-        Ok(curr) => merge_config(&curr, new_cfg),
+        Ok(curr) => {
+            if crate::zcode::provider_config::is_active() {
+                crate::zcode::provider_config::merge_account_overlay(&curr, new_cfg)
+            } else {
+                merge_config(&curr, new_cfg)
+            }
+        }
         Err(_) => new_cfg.to_string(),
     };
     if atomic_write(&cfg_path, &merged_cfg).is_err() {
-        rollback(&last, &cred_path, &cfg_path)?;
+        rollback(&last, &cred_path, &cfg_path, &cfg_name)?;
         return Err(anyhow!("写 config 失败，已回滚"));
     }
     Ok(meta)
 }
 
-fn rollback(last: &Path, cred_path: &Path, cfg_path: &Path) -> Result<()> {
+fn rollback(last: &Path, cred_path: &Path, cfg_path: &Path, cfg_name: &std::ffi::OsStr) -> Result<()> {
     if let Ok(b) = std::fs::read(last.join("credentials.json")) {
         let _ = atomic_write(cred_path, &String::from_utf8_lossy(&b));
     }
-    if let Ok(b) = std::fs::read(last.join("config.json")) {
+    if let Ok(b) = std::fs::read(last.join(cfg_name)) {
         let _ = atomic_write(cfg_path, &String::from_utf8_lossy(&b));
     }
     Ok(())

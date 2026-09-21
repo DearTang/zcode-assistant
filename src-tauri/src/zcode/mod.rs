@@ -5,4 +5,5 @@ pub mod config_file;
 pub mod crypto;
 pub mod paths;
 pub mod process;
+pub mod provider_config;
 pub mod theme_assets;

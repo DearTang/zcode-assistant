@@ -7,7 +7,7 @@
   版本号遵循语义化版本（https://semver.org/lang/zh-CN/）。
   发版流程见 AGENTS.md「Slash rule: 打包」；baseline 记录上一次发布的版本，
   用于步骤 3 的 `git diff --stat <baseline>..HEAD` 完整度核对。
-  baseline: v0.12.1
+  baseline: v0.12.2
 -->
 
 # 更新日志
@@ -19,6 +19,20 @@
 ### 🛠️ 变更
 
 ### 🐛 修复
+
+## v0.12.2 - 2026-09-22
+
+### ✨ 新增
+
+### 🛠️ 变更
+
+- 适配 ZCode 3.14 新版 provider 配置：ZCode 3.14 起用户自定义供应商与模型配置从 `~/.zcode/v2/config.json` 迁到 `~/.zcode/v2/provider_config.json`（`schemaVersion: 1` 全新结构），旧文件不再被 ZCode 读取，导致「模型管理」的增删改全部写进废弃文件而不生效。新增 `src-tauri/src/zcode/provider_config.rs` 适配层做双向投影：读取时把新结构还原为既有的 `{"provider": {...}}` 形状，写回时把改动合并进新结构（只动用户自定义 provider，`builtin:` / `account:` 归 ZCode 内置配置所有，原样保留），旧版 ZCode 仍自动回退 `config.json`。订阅套餐 provider 的新 id（`account:bigmodel-individual-coding-plan` 等）在投影时还原为旧 `builtin:*` id，使既有的订阅识别与配额逻辑继续生效。
+
+### 🐛 修复
+
+- 修复 ZCode 升级后「模型管理」失效：改上下文 / 输出上限、启用禁用模型、增删供应商与模型、拖拽排序等操作全部写进了 ZCode 已不再读取的 `config.json`。现已落到真正生效的 `provider_config.json`，并保留 ZCode 自己写入的字段（`optionSpecs.reasoningLevel` 等请求体映射、套餐模型顺序）。
+- 修复账号切换（快照 / 切换 / 回滚）仍读写旧 `config.json` 的问题：现按 ZCode 版本落到当前生效的配置文件，新格式下只覆盖账号作用域（`builtin:` / `account:`）的订阅规则，用户自定义供应商不受影响。
+- 修复「导入配置」来源 `zcode` 默认路径与解析：默认指向当前生效的配置文件，并支持解析新版 `provider_config.json`。
 
 ## v0.12.1 - 2026-09-21
 

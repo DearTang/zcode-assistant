@@ -82,7 +82,16 @@ fn resolve_path(source: &str, path: Option<&str>) -> Result<PathBuf, String> {
         "opencode" => home.join(".config").join("opencode").join("opencode.json"),
         "claude" => home.join(".claude").join("settings.json"),
         "codex" => home.join(".codex").join("config.toml"),
-        "zcode" => home.join(".zcode").join("v2").join("config.json"),
+        // ZCode 3.14+ 用户 provider 存 provider_config.json，旧版才是 config.json
+        "zcode" => {
+            let v2 = home.join(".zcode").join("v2");
+            let personal = v2.join("provider_config.json");
+            if personal.is_file() {
+                personal
+            } else {
+                v2.join("config.json")
+            }
+        }
         "omp" => home.join(".pi").join("agent").join("models.json"),
         _ => return Err(format!("不支持的来源或需手动指定路径: {source}")),
     })
@@ -145,17 +154,24 @@ fn parse_opencode(path: &Path) -> Result<Vec<ParsedProvider>, String> {
     Ok(out)
 }
 
-// ===== zcode config.json（同构于 opencode，跳过 builtin: 智谱账号）=====
+// ===== zcode（新 provider_config.json / 旧 config.json，跳过 builtin:/account:）=====
 fn parse_zcode(path: &Path) -> Result<Vec<ParsedProvider>, String> {
-    let txt = std::fs::read_to_string(path).map_err(|e| format!("读取失败: {e}"))?;
-    let v: Value = serde_json::from_str(&txt).map_err(|e| format!("JSON 解析失败: {e}"))?;
+    // 新格式（schemaVersion:1 + config.providerConfigRules）先投影为旧的 provider 形状
+    let v = crate::zcode::provider_config::read_as_legacy_at(path).unwrap_or_else(|_| {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|txt| serde_json::from_str::<Value>(&txt).ok())
+            .unwrap_or(Value::Null)
+    });
     let providers = v
         .get("provider")
         .and_then(|p| p.as_object())
         .ok_or("无 provider 字段")?;
     let out = providers
         .iter()
-        .filter(|(id, _)| !id.starts_with("builtin:"))
+        .filter(|(id, _)| {
+            !id.starts_with("builtin:") && !id.starts_with("account:")
+        })
         .filter_map(|(id, p)| parse_provider_entry(id, p))
         .collect();
     Ok(out)

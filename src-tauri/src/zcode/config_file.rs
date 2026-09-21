@@ -1,5 +1,11 @@
 //! config.json / setting.json 读写（原子写）+ apiKey 脱敏
+//!
+//! ZCode 3.14 起用户 provider 改存 v2/provider_config.json（新 schemaVersion:1 结构），
+//! 旧的 v2/config.json 不再被读取。read_config/write_config 因此统一走
+//! `provider_config` 适配层（新文件存在时用新结构，否则回退旧 config.json），
+//! 上层与前端仍按旧的 {"provider": {...}} 形状工作。
 use crate::zcode::paths;
+use crate::zcode::provider_config;
 use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 use std::path::PathBuf;
@@ -24,8 +30,12 @@ pub fn write_json_atomic(p: &Option<PathBuf>, v: &Value) -> Result<()> {
     Ok(())
 }
 
-/// 读取 config.json
+/// 读取 provider 配置（统一入口，始终返回旧的 {"provider": {...}} 形状）。
+/// ZCode 3.14+ 读 v2/provider_config.json 并投影；旧版回退 v2/config.json。
 pub fn read_config() -> Result<Value> {
+    if provider_config::is_active() {
+        return provider_config::read_as_legacy();
+    }
     read_json(&paths::config_path())
 }
 
@@ -37,8 +47,12 @@ pub fn read_setting() -> Result<Value> {
     }
 }
 
-/// 写回 config.json
+/// 写回 provider 配置（统一入口，入参为旧的 {"provider": {...}} 形状）。
+/// ZCode 3.14+ 合并进 v2/provider_config.json；旧版写 v2/config.json。
 pub fn write_config(v: &Value) -> Result<()> {
+    if provider_config::is_active() {
+        return provider_config::apply_legacy(v);
+    }
     write_json_atomic(&paths::config_path(), v)
 }
 
