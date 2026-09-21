@@ -137,6 +137,10 @@ zcode-assistant/
 
 ### 未发布
 
+### v0.12.1 (2026-09-21)
+
+**修复**：`addProvider` invoke 时参数键误写为 `baseURL`，Tauri v2 默认按 snake_case→camelCase 自动映射 `base_url`，期望前端键为 `baseUrl`，导致后端报 `missing required key baseUrl`；TS 形参名保持 `baseURL`，仅修正 invoke 载荷键，与同文件 `updateProvider` / `testConnection` 的「TS 形参 `baseURL`、invoke 键 `baseUrl`」写法对齐。症状：模型管理「添加供应商」保存按钮提交后弹窗报「invalid args baseUrl for command add_provider: missing required key baseUrl」。
+
 ### v0.12.0 (2026-09-19)
 
 **新增**：主界面接入命令面板（Ctrl/Cmd+K 唤起），按关键词搜索并跳转全部 10 个功能页。

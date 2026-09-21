@@ -20,6 +20,16 @@
 
 ### 🐛 修复
 
+## v0.12.1 - 2026-09-21
+
+### ✨ 新增
+
+### 🛠️ 变更
+
+### 🐛 修复
+
+- 修复「添加供应商」保存失败的问题：`addProvider` invoke 时参数键误写为 `baseURL`，Tauri v2 默认按 snake_case→camelCase 自动映射 `base_url`，期望前端键为 `baseUrl`，导致后端报 `missing required key baseUrl`。TS 形参名保持 `baseURL`，仅修正 invoke 载荷键，与同文件 `updateProvider` / `testConnection` 的「TS 形参 `baseURL`、invoke 键 `baseUrl`」写法对齐。
+
 ## v0.12.0 - 2026-09-19
 
 ### ✨ 新增

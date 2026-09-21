@@ -133,7 +133,7 @@ export const models = {
     invoke<string>("add_provider", {
       name,
       kind,
-      baseURL,
+      baseUrl: baseURL,
       apiKey,
       providerId,
     }),
