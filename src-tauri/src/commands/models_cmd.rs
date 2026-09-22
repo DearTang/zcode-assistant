@@ -1,6 +1,7 @@
 //! 模型管理：拉取可用模型、内置规格表、增删 provider、改 model limit
 use crate::state::AppState;
 use crate::zcode::config_file;
+use crate::zcode::provider_config;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
@@ -644,6 +645,14 @@ fn ensure_setting_family_selected(provider_key: &str) -> Result<(), String> {
         .map(|m| m.insert(family.into(), json!(provider_key)))
         .ok_or_else(|| "setting.json 的 modelProviderFamilySelectedKeys 非对象".to_string())?;
     config_file::write_setting(&setting).map_err(|e| e.to_string())
+}
+
+/// ZCode 3.14 迁移回填：把旧 config.json 里 ZCode 自带迁移漏掉的模型信息
+/// （输出上限 / 模态 / 推理档位 / 上下文）补进 provider_config.json。
+/// 只补缺、不覆盖，幂等；可反复调用。
+#[tauri::command]
+pub fn migrate_model_info() -> Result<provider_config::MigrateReport, String> {
+    provider_config::migrate_from_legacy_config().map_err(|e| e.to_string())
 }
 
 /// 测试 provider 连接结果（供「添加供应商」弹窗的「测试」按钮）

@@ -21,7 +21,7 @@ import {
 } from '@/api'
 import type { ExportOutcome, ExportPreview, ImportResult, ProviderPreview } from '@/api'
 import { toast } from '@/composables/toast'
-import type { UsageDisplayMode, ZcProvider, ZcodeConfig, ZcodeSetting, QuotaOverview } from '@/types'
+import type { UsageDisplayMode, ZcProvider, ZcodeConfig, ZcodeSetting, QuotaOverview, MigrateReport } from '@/types'
 
 defineOptions({ name: 'ModelsView' })
 
@@ -65,6 +65,9 @@ const quotaMap = ref<Record<string, QuotaOverview | null>>({})
 // 拖拽排序：gripDown=手柄按下标记（同步变量，避免响应式延迟导致 draggable 时序错位）
 const dragIdx = ref<number | null>(null)
 let gripDown = false
+// ZCode 3.14 迁移回填结果（changed=true 时展示横幅；null=未跑/无旧配置）
+const migrateReport = ref<MigrateReport | null>(null)
+const migrating = ref(false)
 
 const impSourceOptions = [
   { label: 'opencode (opencode.json)', value: 'opencode' },
@@ -84,6 +87,27 @@ async function reload(): Promise<void> {
       selected.value ?? Object.keys(c.provider).find((k) => !k.startsWith('builtin:')) ?? null
   } catch (e: unknown) {
     toast.error(typeof e === 'string' ? e : '读取 zcode 配置失败')
+  }
+  // 迁移回填是幂等的：进来跑一次，把 ZCode 3.14 自带迁移漏掉的模型信息补回
+  void runMigrate()
+}
+
+/** ZCode 3.14 迁移回填：只补缺不覆盖，可安全重复触发 */
+async function runMigrate(): Promise<void> {
+  migrating.value = true
+  try {
+    const r = await models.migrateModelInfo()
+    migrateReport.value = r.changed ? r : null
+    if (r.changed) {
+      // 回填后重新拉一次，让列表立刻显示恢复的 out / 模态
+      const c = await zcode.getConfig()
+      config.value = c
+      toast.success(r.message)
+    }
+  } catch (e: unknown) {
+    toast.error(typeof e === 'string' ? e : '模型信息迁移失败')
+  } finally {
+    migrating.value = false
   }
 }
 
@@ -434,6 +458,17 @@ function lineClass(status: string): string {
   <div class="md">
     <RestartBar hint="供应商 / 模型变更后需重启 zcode 生效" />
 
+    <!-- ZCode 3.14 迁移回填提示：首次打开才出现，补完即消失 -->
+    <div v-if="migrateReport" class="md-migrated">
+      <MyIcon name="WarningFilled" :size="14" class="md-migrated-icon" />
+      <span class="md-migrated-text">
+        ZCode 升级到 3.14 时只迁移了模型名称，输出上限 / 模态 / 推理档位没跟着搬。
+        已从旧配置自动恢复 <b>{{ migrateReport.providers }}</b> 个供应商、<b>{{ migrateReport.models }}</b> 个模型的
+        <b>{{ migrateReport.fields }}</b> 项设置。
+      </span>
+      <MyButton size="small" variant="ghost" :disabled="migrating" @click="runMigrate">重新检查</MyButton>
+    </div>
+
     <!-- 从其他工具导入配置 -->
     <MyPanel title="导入配置">
       <p class="md-desc">
@@ -752,6 +787,30 @@ function lineClass(status: string): string {
 .md {
   display: grid;
   gap: var(--ui-gap);
+}
+/* ZCode 3.14 迁移回填横幅 */
+.md-migrated {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-translucent);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}
+.md-migrated-icon {
+  flex: none;
+  color: var(--warning, oklch(0.75 0.15 75));
+}
+.md-migrated-text {
+  flex: 1;
+}
+.md-migrated-text b {
+  color: var(--text-primary);
+  font-weight: 600;
 }
 .md-desc {
   margin: 0 0 10px;

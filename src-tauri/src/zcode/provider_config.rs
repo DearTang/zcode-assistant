@@ -674,6 +674,344 @@ pub(crate) fn apply_legacy_at(p: &Path, legacy: &Value) -> Result<()> {
     write_json_file(&p, &doc)
 }
 
+// ───────────────────── 旧 config.json 回填迁移 ─────────────────────
+//
+// ZCode 3.14 自带的迁移只搬运了 `limit.context → properties.contextWindow`，
+// 模型上原有的输出上限（limit.output）、模态（modalities）、推理档位（reasoning）
+// 全部没有跟着搬，于是「模型管理」里这些信息看起来集体消失了。
+// 旧 config.json 仍留在磁盘上（ZCode 已不再写它），可在首次启动时回填。
+
+/// 迁移报告
+#[derive(Debug, Default, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrateReport {
+    /// 是否真的写入了内容（false = 无需迁移 / 已迁移过）
+    pub changed: bool,
+    /// 受影响的供应商数
+    pub providers: usize,
+    /// 受影响的模型数
+    pub models: usize,
+    /// 回填的字段数
+    pub fields: usize,
+    pub message: String,
+}
+
+/// 按路径取嵌套值
+fn get_path<'a>(v: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut cur = v;
+    for k in path {
+        cur = cur.get(k)?;
+    }
+    Some(cur)
+}
+
+/// 路径处是否「缺值」（缺失或显式为 null 都算缺）
+fn leaf_missing(v: Option<&Value>, path: &[&str]) -> bool {
+    matches!(v.and_then(|x| get_path(x, path)), None | Some(Value::Null))
+}
+
+/// 仅当路径缺值时写入，返回是否写入。中间层缺失则补建；
+/// 中间层为 null 视为缺值替换；为标量等异常类型则不动（保守）。
+fn set_if_missing(obj: &mut Map<String, Value>, path: &[&str], v: Value) -> bool {
+    let Some((head, rest)) = path.split_first() else {
+        return false;
+    };
+    if rest.is_empty() {
+        match obj.get(*head) {
+            None | Some(Value::Null) => {
+                obj.insert((*head).to_string(), v);
+                true
+            }
+            Some(_) => false,
+        }
+    } else {
+        match obj.get_mut(*head) {
+            Some(Value::Object(m)) => set_if_missing(m, rest, v),
+            None | Some(Value::Null) => {
+                let mut m = Map::new();
+                set_if_missing(&mut m, rest, v);
+                obj.insert((*head).to_string(), Value::Object(m));
+                true
+            }
+            Some(_) => false,
+        }
+    }
+}
+
+/// 旧 modalities → 新 inputFormat / outputFormat。
+/// 纯文本不生成：ZCode 内置规则已声明默认模态，写入反而可能覆盖内置更准确的声明。
+fn formats_from_modalities(mods: &Value) -> Option<(Value, Value)> {
+    let inp = mods.get("input")?.as_array()?;
+    let has = |n: &str| inp.iter().any(|x| x.as_str() == Some(n));
+    if !(has("image") || has("video") || has("audio") || has("pdf")) {
+        return None;
+    }
+    let input_format = json!({
+        "supportsText": has("text"),
+        "supportsImage": has("image"),
+        "supportsVideo": has("video"),
+        "supportsAudio": has("audio"),
+        "supportsPdf": has("pdf"),
+    });
+    let out_text = mods
+        .get("output")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().any(|x| x.as_str() == Some("text")))
+        .unwrap_or(true);
+    Some((input_format, json!({ "supportsText": out_text })))
+}
+
+/// 确保新结构骨架存在（schemaVersion + config）
+fn ensure_skeleton(doc: &mut Value) -> Result<()> {
+    let root = doc
+        .as_object_mut()
+        .context("provider_config.json 顶层非对象")?;
+    if root.get("schemaVersion").is_none() {
+        root.insert("schemaVersion".into(), json!(1));
+    }
+    if !root.get("config").map(|c| c.is_object()).unwrap_or(false) {
+        root.insert("config".into(), json!({}));
+    }
+    Ok(())
+}
+
+/// 用旧 config.json 回填新结构里 ZCode 迁移时丢掉的模型信息。
+/// 只补缺、不覆盖已有值；幂等；仅处理用户自定义供应商。
+pub fn migrate_from_legacy_config() -> Result<MigrateReport> {
+    if !is_active() {
+        return Ok(MigrateReport {
+            message: "当前 ZCode 使用旧版 config.json，无需迁移".into(),
+            ..Default::default()
+        });
+    }
+    let Some(old_path) = paths::config_path() else {
+        return Ok(MigrateReport {
+            message: "未定位旧 config.json".into(),
+            ..Default::default()
+        });
+    };
+    if !old_path.is_file() {
+        return Ok(MigrateReport {
+            message: "旧 config.json 不存在，无可回填来源".into(),
+            ..Default::default()
+        });
+    }
+    let legacy = read_json_file(&old_path)?;
+    let new_path = personal_path().context("未定位 provider_config.json")?;
+    migrate_at(&new_path, &legacy)
+}
+
+pub(crate) fn migrate_at(new_path: &Path, legacy: &Value) -> Result<MigrateReport> {
+    let Some(legacy_provs) = legacy.get("provider").and_then(|p| p.as_object()) else {
+        return Ok(MigrateReport {
+            message: "旧配置无 provider 对象".into(),
+            ..Default::default()
+        });
+    };
+
+    let mut doc = read_json_file(new_path)?;
+    ensure_skeleton(&mut doc)?;
+
+    // ── 只读扫描：先算出待回填项，避免与写回时的可变借用冲突 ──
+    let cfg = doc.get("config").cloned().unwrap_or_else(|| json!({}));
+    let new_providers: std::collections::HashSet<String> = cfg
+        .pointer("/providerConfigRules/providerRules")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|r| {
+                    r.get("providerId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    const LISTS: [&str; 2] = ["manualProviderModelRules", "providerModelRules"];
+    let mcr = cfg.get("modelConfigRules");
+    let rule_cfg = |pid: &str, mid: &str| -> Option<&Value> {
+        LISTS
+            .iter()
+            .find_map(|list| {
+                mcr.and_then(|m| m.get(*list)).and_then(|v| v.as_array()).and_then(|a| {
+                    a.iter().find(|r| {
+                        r.get("providerId").and_then(|v| v.as_str()) == Some(pid)
+                            && r.get("modelId").and_then(|v| v.as_str()) == Some(mid)
+                    })
+                })
+            })
+            .and_then(|r| r.get("config"))
+    };
+
+    // (providerId, modelId, [(路径, 值)])
+    let mut plan: Vec<(String, String, Vec<(Vec<&'static str>, Value)>)> = Vec::new();
+    for (pid, prov) in legacy_provs {
+        if !is_managed(pid) || !new_providers.contains(pid) {
+            continue;
+        }
+        let Some(models) = prov.get("models").and_then(|m| m.as_object()) else {
+            continue;
+        };
+        for (mid, m) in models {
+            let existing = rule_cfg(pid, mid);
+            let mut patches: Vec<(Vec<&'static str>, Value)> = Vec::new();
+
+            // 上下文窗口（ZCode 自带迁移已搬，通常不缺，保险起见仍做补缺）
+            if let Some(c) = m.pointer("/limit/context").and_then(|v| v.as_i64()) {
+                if leaf_missing(existing, &["properties", "contextWindow"]) {
+                    patches.push((vec!["properties", "contextWindow"], json!(c)));
+                }
+            }
+            // 输出上限：ZCode 迁移会丢，主要回填目标
+            if let Some(o) = m.pointer("/limit/output").and_then(|v| v.as_i64()) {
+                if leaf_missing(existing, &["optionSpecs", "maxOutputTokens", "max"]) {
+                    patches.push((vec!["optionSpecs", "maxOutputTokens", "max"], json!(o)));
+                }
+            }
+            // 模态：仅在含非文本输入时回填
+            if let Some(mods) = m.get("modalities") {
+                if let Some((inp, outp)) = formats_from_modalities(mods) {
+                    if leaf_missing(existing, &["properties", "inputFormat"]) {
+                        patches.push((vec!["properties", "inputFormat"], inp));
+                    }
+                    if leaf_missing(existing, &["properties", "outputFormat"]) {
+                        patches.push((vec!["properties", "outputFormat"], outp));
+                    }
+                }
+            }
+            // 推理档位：ZCode 迁移会丢
+            if let Some(vals) = m.pointer("/reasoning/variants").and_then(|v| v.as_array()) {
+                let vals: Vec<Value> = vals
+                    .iter()
+                    .filter(|v| v.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false))
+                    .cloned()
+                    .collect();
+                if !vals.is_empty()
+                    && leaf_missing(existing, &["optionSpecs", "reasoningLevel", "values"])
+                {
+                    patches.push((
+                        vec!["optionSpecs", "reasoningLevel", "values"],
+                        Value::Array(vals),
+                    ));
+                }
+            }
+
+            if !patches.is_empty() {
+                plan.push((pid.clone(), mid.clone(), patches));
+            }
+        }
+    }
+
+    if plan.is_empty() {
+        return Ok(MigrateReport {
+            message: "旧配置中的模型信息已完整，无需迁移".into(),
+            ..Default::default()
+        });
+    }
+
+    // ── 应用：写入 providerModelRules（同 provider/model 两表互斥，智能规则优先）──
+    {
+        let cfg = doc
+            .get_mut("config")
+            .and_then(|c| c.as_object_mut())
+            .context("config 非对象")?;
+        let mcr = cfg
+            .entry("modelConfigRules".to_string())
+            .or_insert_with(|| json!({}));
+        if !mcr.is_object() {
+            *mcr = json!({});
+        }
+        let mcr_obj = mcr.as_object_mut().unwrap();
+        for list_key in LISTS {
+            let arr = mcr_obj
+                .entry(list_key.to_string())
+                .or_insert_with(|| json!([]));
+            if !arr.is_array() {
+                *arr = json!([]);
+            }
+        }
+
+        let mut fields = 0usize;
+        let mut touched: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        let mut touched_providers: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for (pid, mid, patches) in plan {
+            let found: Option<(&str, usize)> = LISTS.iter().find_map(|list| {
+                mcr_obj
+                    .get(*list)
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| {
+                        a.iter()
+                            .position(|r| {
+                                r.get("providerId").and_then(|v| v.as_str()) == Some(pid.as_str())
+                                    && r.get("modelId").and_then(|v| v.as_str()) == Some(mid.as_str())
+                            })
+                            .map(|i| (*list, i))
+                    })
+            });
+
+            let rule = match found {
+                Some((list, i)) => mcr_obj
+                    .get_mut(list)
+                    .and_then(|v| v.as_array_mut())
+                    .and_then(|a| a.get_mut(i)),
+                None => {
+                    let arr = mcr_obj
+                        .get_mut("providerModelRules")
+                        .and_then(|v| v.as_array_mut())
+                        .unwrap();
+                    arr.push(json!({ "providerId": pid, "modelId": mid, "config": {} }));
+                    arr.last_mut()
+                }
+            };
+            let Some(rule) = rule else { continue };
+            if !rule.get("config").map(|c| c.is_object()).unwrap_or(false) {
+                if let Some(o) = rule.as_object_mut() {
+                    o.insert("config".into(), json!({}));
+                }
+            }
+            let Some(rcfg) = rule.get_mut("config").and_then(|c| c.as_object_mut()) else {
+                continue;
+            };
+            let mut wrote = 0usize;
+            for (path, val) in patches {
+                if set_if_missing(rcfg, &path, val) {
+                    wrote += 1;
+                }
+            }
+            if wrote > 0 {
+                fields += wrote;
+                touched.insert((pid.clone(), mid.clone()));
+                touched_providers.insert(pid);
+            }
+        }
+
+        if fields == 0 {
+            return Ok(MigrateReport {
+                message: "旧配置中的模型信息已完整，无需迁移".into(),
+                ..Default::default()
+            });
+        }
+
+        write_json_file(new_path, &doc)?;
+        Ok(MigrateReport {
+            changed: true,
+            providers: touched_providers.len(),
+            models: touched.len(),
+            fields,
+            message: format!(
+                "已从旧配置恢复 {} 个供应商 / {} 个模型的 {} 项设置",
+                touched_providers.len(),
+                touched.len(),
+                fields
+            ),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,8 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_provider_is_dropped_from_new_schema() {
-        let p = tmp_file("remove");
+    fn removed_provider_is_dropped_from_new_schema() {        let p = tmp_file("remove");
         fs::write(&p, serde_json::to_string_pretty(&sample_doc()).unwrap()).unwrap();
 
         let mut legacy = read_as_legacy_at(&p).unwrap();
@@ -1224,5 +1561,311 @@ mod tests {
 
         println!("schema-conformance OK");
         let _ = fs::remove_file(&p);
+    }
+
+    // ─────────── 迁移回填（旧 config.json → 新 provider_config.json）───────────
+
+    /// 构造「ZCode 自带迁移后」的新结构：只搬了 contextWindow，
+    /// 丢了 output / modalities / reasoning —— 这正是线上暴露的问题。
+    fn migrated_doc() -> Value {
+        json!({
+          "schemaVersion": 1,
+          "config": {
+            "providerOrder": ["p1", "account:bigmodel-individual-coding-plan"],
+            "providerConfigRules": {
+              "providerRules": [
+                {
+                  "providerId": "p1",
+                  "providerName": "P1",
+                  "enabled": true,
+                  "config": {
+                    "group": "standard-personal",
+                    "access": { "type": "api-key", "apiKey": "sk-1" },
+                    "api": { "type": "openai-chat-completions", "baseUrl": "https://p1.example/v1" },
+                    "personalModelIds": ["m-vision", "m-plain", "m-custom"],
+                    "modelOrder": ["m-vision", "m-plain", "m-custom"]
+                  }
+                },
+                {
+                  "providerId": "account:bigmodel-individual-coding-plan",
+                  "config": { "personalModelIds": [], "modelOrder": ["GLM-5.3"] }
+                }
+              ]
+            },
+            "modelConfigRules": {
+              // 智能规则已带 contextWindow（ZCode 迁移搬过）+ 一个 ZCode 写的 map
+              "providerModelRules": [
+                {
+                  "providerId": "p1",
+                  "modelId": "m-vision",
+                  "config": {
+                    "properties": { "contextWindow": 111111 },
+                    "optionSpecs": { "reasoningLevel": { "map": "{\"thinking\":1}" } }
+                  }
+                },
+                { "providerId": "p1", "modelId": "m-plain", "config": { "properties": { "contextWindow": 222222 } } }
+              ],
+              // m-custom 是「手动配置」规则：不能被智能规则挤掉
+              "manualProviderModelRules": [
+                { "providerId": "p1", "modelId": "m-custom", "config": { "enabled": false } }
+              ]
+            }
+          }
+        })
+    }
+
+    /// 旧 config.json（含被漏掉的字段）
+    fn legacy_with_full_model_info() -> Value {
+        json!({
+          "provider": {
+            "p1": {
+              "name": "P1",
+              "kind": "openai-compatible",
+              "options": { "apiKey": "sk-1", "baseURL": "https://p1.example/v1" },
+              "source": "custom",
+              "enabled": true,
+              "models": {
+                "m-vision": {
+                  "limit": { "context": 111111, "output": 64000 },
+                  "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
+                  "reasoning": { "enabled": true, "variants": ["low", "high", "max"], "defaultVariant": "max" }
+                },
+                "m-plain": {
+                  "limit": { "context": 222222, "output": 32000 },
+                  "modalities": { "input": ["text"], "output": ["text"] }
+                },
+                "m-custom": {
+                  "limit": { "context": 333333, "output": 16000 }
+                }
+              }
+            },
+            "builtin:bigmodel": { "name": "ignore me", "models": {} }
+          }
+        })
+    }
+
+    #[test]
+    fn migration_backfills_what_zcode_dropped() {
+        let p = tmp_file("migrate");
+        fs::write(&p, serde_json::to_string_pretty(&migrated_doc()).unwrap()).unwrap();
+
+        let rep = migrate_at(&p, &legacy_with_full_model_info()).expect("migrate");
+        assert!(rep.changed, "应当发生迁移");
+        assert_eq!(rep.models, 3, "3 个模型受影响");
+
+        let doc: Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        let rules = doc["config"]["modelConfigRules"]["providerModelRules"]
+            .as_array()
+            .unwrap();
+        let manual = doc["config"]["modelConfigRules"]["manualProviderModelRules"]
+            .as_array()
+            .unwrap();
+        let find = |mid: &str| -> Option<&Value> {
+            rules
+                .iter()
+                .chain(manual.iter())
+                .find(|r| r["providerId"] == "p1" && r["modelId"] == mid)
+        };
+
+        // 1) 输出上限被回填（ZCode 丢掉的主项）
+        let v = find("m-vision").unwrap();
+        assert_eq!(v["config"]["optionSpecs"]["maxOutputTokens"]["max"], 64000);
+        assert_eq!(find("m-plain").unwrap()["config"]["optionSpecs"]["maxOutputTokens"]["max"], 32000);
+        assert_eq!(find("m-custom").unwrap()["config"]["optionSpecs"]["maxOutputTokens"]["max"], 16000);
+
+        // 2) 模态被回填为 inputFormat/outputFormat
+        let fmt = &v["config"]["properties"]["inputFormat"];
+        assert_eq!(fmt["supportsText"], true);
+        assert_eq!(fmt["supportsImage"], true);
+        assert_eq!(fmt["supportsVideo"], true);
+        assert_eq!(fmt["supportsPdf"], false);
+        assert_eq!(v["config"]["properties"]["outputFormat"]["supportsText"], true);
+
+        // 3) 纯文本模态不生成 inputFormat（避免覆盖 ZCode 内置更准确的声明）
+        assert!(
+            find("m-plain").unwrap()["config"]["properties"]["inputFormat"].is_null(),
+            "纯文本模型不应写入 inputFormat"
+        );
+
+        // 4) 已有 contextWindow 不被覆盖
+        assert_eq!(v["config"]["properties"]["contextWindow"], 111111);
+        assert_eq!(find("m-plain").unwrap()["config"]["properties"]["contextWindow"], 222222);
+
+        // 5) ZCode 自己写的 map 必须保留
+        assert_eq!(
+            v["config"]["optionSpecs"]["reasoningLevel"]["map"],
+            "{\"thinking\":1}"
+        );
+        // 6) reasoning.variants → reasoningLevel.values 补上，且与 map 并存
+        assert_eq!(
+            v["config"]["optionSpecs"]["reasoningLevel"]["values"],
+            json!(["low", "high", "max"])
+        );
+
+        // 7) 手动规则原地补齐，未被挪到智能规则表
+        let mc = manual
+            .iter()
+            .find(|r| r["providerId"] == "p1" && r["modelId"] == "m-custom")
+            .unwrap();
+        assert_eq!(mc["config"]["enabled"], false, "手动配置的 enabled 保留");
+        assert_eq!(mc["config"]["properties"]["contextWindow"], 333333);
+        assert!(
+            !rules.iter().any(|r| r["modelId"] == "m-custom"),
+            "手动规则不应被复制进 providerModelRules（两表互斥）"
+        );
+
+        // 8) 内置 provider 被忽略
+        assert!(!rules.iter().any(|r| r["providerId"] == "builtin:bigmodel"));
+
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let p = tmp_file("migrate-idem");
+        fs::write(&p, serde_json::to_string_pretty(&migrated_doc()).unwrap()).unwrap();
+
+        let r1 = migrate_at(&p, &legacy_with_full_model_info()).unwrap();
+        assert!(r1.changed && r1.fields > 0);
+        let after1 = fs::read_to_string(&p).unwrap();
+
+        // 第二次不应再改动任何东西
+        let r2 = migrate_at(&p, &legacy_with_full_model_info()).unwrap();
+        assert!(!r2.changed, "重复迁移应为 no-op");
+        assert_eq!(after1, fs::read_to_string(&p).unwrap(), "文件内容不变");
+
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn migration_does_not_invent_values() {
+        let p = tmp_file("migrate-empty");
+        fs::write(&p, serde_json::to_string_pretty(&migrated_doc()).unwrap()).unwrap();
+
+        // 旧配置里模型没有任何 limit/modalities/reasoning → 不应凭空写入
+        let legacy = json!({
+          "provider": {
+            "p1": {
+              "name": "P1",
+              "models": { "m-vision": {}, "m-plain": {}, "m-custom": {} }
+            }
+          }
+        });
+        let rep = migrate_at(&p, &legacy).unwrap();
+        assert!(!rep.changed, "无可回填内容时不应改动文件");
+        assert_eq!(rep.fields, 0);
+
+        let _ = fs::remove_file(&p);
+    }
+
+    #[test]
+    fn migration_ignores_unknown_and_builtin_providers() {
+        let p = tmp_file("migrate-unknown");
+        fs::write(&p, serde_json::to_string_pretty(&migrated_doc()).unwrap()).unwrap();
+
+        // 旧配置里的 provider 若新结构里不存在（用户已删），不应被重新造出来
+        let legacy = json!({
+          "provider": {
+            "gone-provider": {
+              "name": "Gone",
+              "models": { "x": { "limit": { "context": 1, "output": 2 } } }
+            },
+            "builtin:bigmodel": {
+              "name": "Builtin",
+              "models": { "GLM-5.3": { "limit": { "context": 9, "output": 9 } } }
+            }
+          }
+        });
+        let rep = migrate_at(&p, &legacy).unwrap();
+        assert!(!rep.changed, "不应为已删除/内置 provider 回填");
+
+        let doc: Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        let rules = doc["config"]["modelConfigRules"]["providerModelRules"]
+            .as_array()
+            .unwrap();
+        assert!(!rules.iter().any(|r| r["providerId"] == "gone-provider"));
+
+        let _ = fs::remove_file(&p);
+    }
+
+    /// 真实配置核对：对线上数据的副本跑迁移，打印实际回填量。
+    /// `cargo test --lib provider_config::tests::migration_on_real_config -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn migration_on_real_config() {
+        let Some(new_src) = personal_path() else { return };
+        let Some(old_src) = paths::config_path() else { return };
+        if !new_src.is_file() || !old_src.is_file() {
+            println!("(缺少真实配置)");
+            return;
+        }
+        let p = tmp_file("real-migrate");
+        fs::copy(&new_src, &p).unwrap();
+        let legacy: Value =
+            serde_json::from_str(&fs::read_to_string(&old_src).unwrap()).unwrap();
+
+        let rep = migrate_at(&p, &legacy).expect("migrate");
+        println!("changed={} providers={} models={} fields={}",
+            rep.changed, rep.providers, rep.models, rep.fields);
+        println!("{}", rep.message);
+
+        // 迁移后：输出上限/模态应从「全缺」变为「基本齐备」
+        let doc: Value = serde_json::from_str(&fs::read_to_string(&p).unwrap()).unwrap();
+        let rules = doc["config"]["modelConfigRules"]["providerModelRules"]
+            .as_array()
+            .unwrap();
+        let managed: Vec<&Value> = rules
+            .iter()
+            .filter(|r| is_managed(r["providerId"].as_str().unwrap_or("")))
+            .collect();
+        let with_max = managed
+            .iter()
+            .filter(|r| r["config"]["optionSpecs"]["maxOutputTokens"]["max"].is_i64())
+            .count();
+        let with_fmt = managed
+            .iter()
+            .filter(|r| r["config"]["properties"]["inputFormat"].is_object())
+            .count();
+        println!("受管模型 {} 个：带回填 out={} 带模态={}", managed.len(), with_max, with_fmt);
+
+        // 幂等确认
+        let r2 = migrate_at(&p, &legacy).unwrap();
+        assert!(!r2.changed, "重复运行应为 no-op");
+
+        let _ = fs::remove_file(&p);
+    }
+
+    /// 对**真实** provider_config.json 执行迁移（先备份）。
+    /// 这是应用启动时自动执行的生产路径，此处仅供手动补跑。
+    /// `cargo test --lib provider_config::tests::migrate_real_config_in_place -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn migrate_real_config_in_place() {
+        let Some(new_path) = personal_path() else { return };
+        if !new_path.is_file() {
+            println!("(无 provider_config.json)");
+            return;
+        }
+
+        // 备份，便于回退
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let backup = new_path.with_file_name(format!("provider_config.json.bak-migrate-{stamp}"));
+        fs::copy(&new_path, &backup).expect("备份失败");
+        println!("备份 -> {}", backup.display());
+
+        let before = fs::read_to_string(&new_path).unwrap();
+        let rep = migrate_from_legacy_config().expect("迁移失败");
+        println!(
+            "changed={} providers={} models={} fields={}",
+            rep.changed, rep.providers, rep.models, rep.fields
+        );
+        println!("{}", rep.message);
+
+        if rep.changed {
+            let after = fs::read_to_string(&new_path).unwrap();
+            println!("文件已更新（{} 字节 -> {} 字节）", before.len(), after.len());
+        } else {
+            println!("文件未改动");
+        }
     }
 }

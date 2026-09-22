@@ -61,6 +61,19 @@ export interface ZcodeSetting {
 /** provider id 类型 */
 export type ProviderId = string;
 
+/** ZCode 3.14 迁移回填报告（旧 config.json → provider_config.json 补缺） */
+export interface MigrateReport {
+  /** 是否真的写入了内容（false = 无需迁移 / 已迁移过） */
+  changed: boolean;
+  /** 受影响的供应商数 */
+  providers: number;
+  /** 受影响的模型数 */
+  models: number;
+  /** 回填的字段数 */
+  fields: number;
+  message: string;
+}
+
 /** 配额单位 */
 export type QuotaUnit = "quota" | "tokens" | "requests" | string;
 

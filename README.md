@@ -137,6 +137,10 @@ zcode-assistant/
 
 ### 未发布
 
+### v0.13.0 (2026-09-22)
+
+**新增**：ZCode 3.14 模型信息自动迁移。ZCode 升级到 3.14 时自带的迁移只搬运了模型的上下文窗口（`limit.context` → `properties.contextWindow`），模型原有的**输出上限、模态、推理档位**全部没跟着搬，表现为「升级后原来导入的模型信息都不见了」（旧 `config.json` 里这些数据仍在，只是新配置里为空）。现从旧 `config.json` 自动回填缺失字段，**只补缺不覆盖**、幂等可重复执行：应用启动时后台自动跑一次，模型管理页进入时再核对一次，有回填时页面顶部给出横幅汇总（供应商 / 模型 / 字段数），也可点「重新检查」手动重跑。回填时保留 ZCode 自己写入的字段（`optionSpecs.reasoningLevel.map` 等请求体映射），纯文本模型不写 `inputFormat` 以免覆盖内置更准确的模态声明，手动配置的模型规则原地补齐、不会被挪进智能规则表。
+
 ### v0.12.2 (2026-09-22)
 
 **修复**：ZCode 升级到 3.14 后「模型管理」失效——ZCode 3.14 起把用户自定义供应商与模型配置从 `~/.zcode/v2/config.json` 迁到 `~/.zcode/v2/provider_config.json`（`schemaVersion: 1` 全新结构），旧文件不再被读取，导致改上下文 / 输出上限、启用禁用模型、增删供应商与模型、拖拽排序等操作全部写进废弃文件而不生效。新增 `provider_config.rs` 适配层做双向投影：读取时把新结构还原为既有的 `{"provider": {...}}` 形状，写回时把改动合并进新结构（只动用户自定义 provider，`builtin:` / `account:` 归 ZCode 内置配置所有原样保留），并保留 ZCode 自己写入的字段（`optionSpecs.reasoningLevel` 等请求体映射、套餐模型顺序）；订阅套餐 provider 的新 id（`account:bigmodel-individual-coding-plan` 等）投影时还原为旧 `builtin:*` id，使既有订阅识别与配额逻辑继续生效；旧版 ZCode 仍自动回退 `config.json` · 账号切换（快照 / 切换 / 回滚）同样按版本落到当前生效的配置文件，新格式下只覆盖账号作用域的订阅规则，用户自定义供应商不受影响 · 「导入配置」来源 `zcode` 的默认路径与解析同步适配新文件。

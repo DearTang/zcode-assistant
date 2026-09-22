@@ -92,6 +92,16 @@ pub fn run() {
                 let _ = provider_resolve::scan_transcripts(&state.db);
             });
 
+            // ZCode 3.14 迁移回填：把旧 config.json 里 ZCode 自带迁移漏掉的模型信息
+            // （输出上限 / 模态 / 推理档位）补回 provider_config.json。只补缺、幂等。
+            tauri::async_runtime::spawn_blocking(move || {
+                match zcode::provider_config::migrate_from_legacy_config() {
+                    Ok(r) if r.changed => log::info!("模型信息迁移回填：{}", r.message),
+                    Ok(_) => {}
+                    Err(e) => log::warn!("模型信息迁移回填失败（不影响启动）：{e}"),
+                }
+            });
+
             // OpenRouter 模型目录：每日启动拉取一次真实上下文（今天已拉过则跳过；
             // 失败沿用上一次目录），供「拉取可用模型」模糊匹配填充 context
             let handle = app.handle().clone();
@@ -158,6 +168,8 @@ pub fn run() {
             commands::models_cmd::get_primary_provider,
             commands::models_cmd::bootstrap_primary,
             commands::models_cmd::test_provider_connection,
+            // ZCode 3.14 迁移回填（旧 config.json → provider_config.json 补缺）
+            commands::models_cmd::migrate_model_info,
             // 导入配置
             commands::import_cmd::preview_providers_from,
             commands::import_cmd::import_providers_from,

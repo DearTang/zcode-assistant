@@ -18,6 +18,7 @@ import type {
   HealthReport,
   ModelSpec,
   ModelRetryConfig,
+  MigrateReport,
   ProxyConfig,
   QuotaBucket,
   QuotaTemplate,
@@ -211,6 +212,12 @@ export const models = {
       "test_provider_connection",
       { baseUrl: baseURL, apiKey, kind }
     ),
+  /**
+   * ZCode 3.14 迁移回填：把旧 config.json 里 ZCode 自带迁移漏掉的模型信息
+   * （输出上限 / 模态 / 推理档位 / 上下文）补进 provider_config.json。
+   * 只补缺、不覆盖，幂等；启动时已自动跑一次，此处供手动重试。
+   */
+  migrateModelInfo: () => invoke<MigrateReport>("migrate_model_info"),
 };
 
 /* ============ 配额（M3）============ */
